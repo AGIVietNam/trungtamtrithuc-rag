@@ -21,6 +21,27 @@ _SUGGESTION_PATTERN = re.compile(
     re.DOTALL,
 )
 
+# Ngưỡng top rerank score tối thiểu để coi là có context trả lời.
+# Dưới ngưỡng → trả refusal cứng (không gọi Claude, tránh hallucinate từ training data).
+# BGE reranker score: >0.5 rất liên quan; 0.0-0.5 mờ; <0 không liên quan.
+_MIN_CONFIDENCE_TO_ANSWER: float = 0.25
+
+_REFUSAL_TEMPLATE = (
+    "Tài liệu TDI hiện chưa có thông tin về câu hỏi này.\n\n"
+    "Bạn có thể:\n"
+    "- Bổ sung tài liệu liên quan qua trang nạp dữ liệu.\n"
+    "- Thử đổi sang lĩnh vực 'Tất cả lĩnh vực' để mở rộng tìm kiếm.\n"
+    "- Diễn đạt lại câu hỏi với từ khoá cụ thể hơn."
+)
+
+
+def _should_refuse(hits: list) -> bool:
+    """True khi không có hit nào hoặc top score dưới ngưỡng tin cậy."""
+    if not hits:
+        return True
+    top = hits[0].score if hits[0].score is not None else 0.0
+    return top < _MIN_CONFIDENCE_TO_ANSWER
+
 
 def _extract_suggestions(answer: str) -> tuple[str, list[str]]:
     """Split answer into (clean_answer, suggested_questions)."""
@@ -102,6 +123,19 @@ class RAGChain:
 
         hits = self.reranker.rerank(search_query, hits, top_k=self.rerank_top_k)
 
+        # --- 2b. Guard: không đủ context → refuse cứng, KHÔNG gọi Claude
+        # (tránh hallucinate từ training data).
+        if _should_refuse(hits):
+            return {
+                "answer": _REFUSAL_TEMPLATE,
+                "sources": [],
+                "confidence": "low",
+                "suggested_questions": [],
+                "rewritten_query": search_query if search_query != query else None,
+                "recall_count": len(recall_pairs),
+                "refused": True,
+            }
+
         # --- 3. Build prompt: system + conversation_block + doc context
         system_prompt = build_system_prompt(expert_domain)
         conv_block = build_conversation_block(summary, recall_pairs)
@@ -171,6 +205,23 @@ class RAGChain:
                     recall_pairs = []
 
         hits = self.reranker.rerank(search_query, hits, top_k=self.rerank_top_k)
+
+        # Guard: không đủ context → emit refusal events và dừng, không gọi Claude.
+        if _should_refuse(hits):
+            yield {
+                "type": "meta", "confidence": "low",
+                "rewritten_query": search_query if search_query != query else None,
+                "recall_count": len(recall_pairs),
+                "refused": True,
+            }
+            yield {"type": "delta", "text": _REFUSAL_TEMPLATE}
+            yield {
+                "type": "done",
+                "answer": _REFUSAL_TEMPLATE,
+                "sources": [],
+                "suggested_questions": [],
+            }
+            return
 
         system_prompt = build_system_prompt(expert_domain)
         conv_block = build_conversation_block(summary, recall_pairs)
