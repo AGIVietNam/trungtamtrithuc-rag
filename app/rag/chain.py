@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import re
-from collections.abc import AsyncIterator
+from collections.abc import Iterator
 from typing import Any
 
 from app.core.claude_client import ClaudeClient
@@ -132,29 +132,78 @@ class RAGChain:
             "recall_count": len(recall_pairs),
         }
 
-    async def answer_stream(
+    def answer_stream(
         self,
         query: str,
         history: list[dict] | None = None,
         expert_domain: str | None = None,
         sources_filter: list[str] | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
-        hits = self.retriever.retrieve(query, top_k=self.top_k, sources=sources_filter)
-        hits = self.reranker.rerank(query, hits, top_k=self.rerank_top_k)
+        user_id: str | None = None,
+        session_id: str | None = None,
+        summary: str = "",
+        conv_memory: ConversationMemory | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        history = history or []
+
+        search_query = query
+        if conv_memory is not None and user_id and history:
+            try:
+                search_query = rewrite_query(self.claude, query, history)
+            except Exception:
+                search_query = query
+
+        recall_pairs: list[dict] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            f_docs = ex.submit(
+                self.retriever.retrieve,
+                search_query, self.top_k, sources_filter, expert_domain,
+            )
+            f_conv = None
+            if conv_memory is not None and user_id:
+                f_conv = ex.submit(
+                    conv_memory.retrieve, user_id, search_query, session_id,
+                )
+            hits = f_docs.result()
+            if f_conv is not None:
+                try:
+                    recall_pairs = f_conv.result()
+                except Exception:
+                    recall_pairs = []
+
+        hits = self.reranker.rerank(search_query, hits, top_k=self.rerank_top_k)
 
         system_prompt = build_system_prompt(expert_domain)
+        conv_block = build_conversation_block(summary, recall_pairs)
+        if conv_block:
+            system_prompt = system_prompt + "\n\n" + conv_block
+
         context_block, source_mapping = build_context_block(hits)
+        messages = list(history) + [{"role": "user", "content": query}]
 
-        messages = list(history or [])
-        messages.append({"role": "user", "content": query})
+        top_score = hits[0].score if hits else 0.0
+        yield {
+            "type": "meta",
+            "confidence": _confidence(top_score),
+            "rewritten_query": search_query if search_query != query else None,
+            "recall_count": len(recall_pairs),
+        }
 
-        yield {"type": "meta", "sources": source_mapping}
-
+        buffer_parts: list[str] = []
         for chunk in self.claude.generate_stream(
             system_prompt=system_prompt,
             context_block=context_block,
             messages=messages,
         ):
+            buffer_parts.append(chunk)
             yield {"type": "delta", "text": chunk}
 
-        yield {"type": "done"}
+        full_text = "".join(buffer_parts)
+        clean_answer, suggested_questions = _extract_suggestions(full_text)
+        has_sources = "Nguồn:" in clean_answer or "nguồn:" in clean_answer.lower()
+
+        yield {
+            "type": "done",
+            "answer": clean_answer,
+            "sources": source_mapping if has_sources else [],
+            "suggested_questions": suggested_questions,
+        }

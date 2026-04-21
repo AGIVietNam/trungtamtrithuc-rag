@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Iterator
 
 from fastapi import APIRouter, BackgroundTasks
+from fastapi.responses import StreamingResponse
 
 from app.schemas import ChatRequest, ChatResponse
 from app.config import (
@@ -200,6 +203,64 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks) -> ChatR
         sources=result.get("sources", []),
         session_id=request.session_id,
         suggested_questions=result.get("suggested_questions", []),
+    )
+
+
+@router.post("/stream")
+async def chat_stream(
+    request: ChatRequest, background_tasks: BackgroundTasks
+) -> StreamingResponse:
+    """SSE streaming endpoint — emits `meta`, `delta`, `done`, `error` events."""
+    chain = _get_chain()
+    history = memory.get_history(request.session_id)
+    summary = memory.get_summary(request.session_id)
+
+    domain = (
+        request.domain
+        if request.domain and request.domain not in ("general", "mặc định")
+        else None
+    )
+    effective_user_id = (request.user_id or "").strip() or request.session_id
+
+    def event_generator() -> Iterator[str]:
+        final_answer = ""
+        try:
+            for event in chain.answer_stream(
+                query=request.message,
+                history=history,
+                expert_domain=domain,
+                user_id=effective_user_id,
+                session_id=request.session_id,
+                summary=summary,
+                conv_memory=_get_conv_memory(),
+            ):
+                if event.get("type") == "done":
+                    final_answer = event.get("answer", "") or ""
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            logger.exception("RAG stream error: %s", exc)
+            err = {"type": "error", "message": str(exc)}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+            return
+
+        if final_answer:
+            background_tasks.add_task(
+                _post_turn_memory_update,
+                session_id=request.session_id,
+                user_id=effective_user_id,
+                user_msg=request.message,
+                assistant_msg=final_answer,
+                domain=request.domain or "mặc định",
+            )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

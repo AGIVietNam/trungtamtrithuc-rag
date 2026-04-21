@@ -505,6 +505,8 @@
   }
   function removeTyping() { document.getElementById('typing-msg')?.remove(); }
 
+  const SUGGESTION_MARKER = /\n*---GỢI Ý---/;
+
   async function send() {
     const text = inputBox.value.trim();
     if (!text || sendBtn.disabled) return;
@@ -516,8 +518,51 @@
     addBubble('user', text);
     addTyping();
 
+    let streamBubble = null;
+    let streamTextEl = null;
+    let streamedText = '';
+    let finalAnswer = '';
+    let finalSources = [];
+    let finalSuggestions = [];
+
+    const ensureStreamBubble = () => {
+      if (streamBubble) return;
+      removeTyping();
+      clearEmpty();
+      streamBubble = document.createElement('div');
+      streamBubble.className = 'flex items-start gap-3 max-w-[90%]';
+      streamBubble.innerHTML = `
+        <div class="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+          <span class="material-symbols-outlined text-primary text-[20px]">smart_toy</span>
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="text-base text-on-surface leading-[1.6] whitespace-pre-wrap"></div>
+        </div>`;
+      streamTextEl = streamBubble.querySelector('.text-base');
+      messagesInner.appendChild(streamBubble);
+    };
+
+    const processEvent = (payload) => {
+      let evt;
+      try { evt = JSON.parse(payload); } catch { return; }
+
+      if (evt.type === 'delta') {
+        ensureStreamBubble();
+        streamedText += evt.text || '';
+        const visible = streamedText.split(SUGGESTION_MARKER)[0];
+        streamTextEl.innerHTML = linkify(visible);
+        messagesScroll.scrollTop = messagesScroll.scrollHeight;
+      } else if (evt.type === 'done') {
+        finalAnswer = evt.answer || streamedText.split(SUGGESTION_MARKER)[0];
+        finalSources = evt.sources || [];
+        finalSuggestions = evt.suggested_questions || [];
+      } else if (evt.type === 'error') {
+        throw new Error(evt.message || 'Lỗi stream');
+      }
+    };
+
     try {
-      const resp = await fetch(`${API_BASE}/api/chat/`, {
+      const resp = await fetch(`${API_BASE}/api/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -528,13 +573,34 @@
           history: []
         })
       });
-      removeTyping();
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = await resp.json();
+      if (!resp.body) throw new Error('Trình duyệt không hỗ trợ stream');
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) >= 0) {
+          const raw = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          for (const line of raw.split('\n')) {
+            if (line.startsWith('data:')) processEvent(line.slice(5).trim());
+          }
+        }
+      }
+
+      removeTyping();
+      if (streamBubble) streamBubble.remove();
       document.querySelectorAll('.suggestions').forEach(el => el.remove());
-      addBubble('ai', data.answer, data.sources || [], true, data.suggested_questions || []);
+      addBubble('ai', finalAnswer || streamedText, finalSources, true, finalSuggestions);
     } catch (err) {
       removeTyping();
+      if (streamBubble) streamBubble.remove();
       addBubble('ai', `Lỗi kết nối: ${err.message}. Kiểm tra server đang chạy tại localhost:8000.`);
     } finally {
       sendBtn.disabled = false;
