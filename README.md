@@ -118,7 +118,7 @@ Dùng cho ingest file/video: upload file gốc lên S3 → `payload.url` trong Q
 | `S3_SECRET_ACCESS_KEY` | Secret key. |
 | `S3_REGION` | Region label, mặc định `us-east-1`. |
 
-Object key theo format `docs/<sha256>.<ext>` hoặc `videos/<sha256>.<ext>` — deterministic, cùng nội dung → cùng key (idempotent, không duplicate storage). ACL `public-read` tự set per-object.
+Object key theo format `docs/<domain-slug>/<sha256>.<ext>` hoặc `videos/<domain-slug>/<sha256>.<ext>` — deterministic, cùng nội dung + cùng domain → cùng key (idempotent, không duplicate storage). Domain slug ASCII-safe (`Pháp lý` → `phap-ly`, `mặc định` → `mac-dinh`, trống → `unsorted`). ACL `public-read` tự set per-object.
 
 ### Conversation Memory (Hybrid 3 tầng)
 

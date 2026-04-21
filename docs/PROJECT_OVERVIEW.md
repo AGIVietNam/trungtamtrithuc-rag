@@ -64,13 +64,15 @@ Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5**
   |  +---------------------------------------------------------+ |
   +--------------------------------------------------------------+
 
-            +--------------------------------------------+
-            |   S3-compatible Object Storage             |
-            |   (AWS / Viettel IDC / MinIO / R2)         |
-            |   bucket/docs/<sha256>.pdf                 |
-            |   bucket/videos/<sha256>.mp4               |
-            |   Upload lúc ingest; URL lưu ở payload.url |
-            +--------------------------------------------+
+            +-----------------------------------------------------+
+            |   S3-compatible Object Storage                      |
+            |   (AWS / Viettel IDC / MinIO / R2)                  |
+            |   bucket/docs/<domain-slug>/<sha256>.pdf            |
+            |   bucket/videos/<domain-slug>/<sha256>.mp4          |
+            |   Domain slug ASCII: 'Pháp lý' → 'phap-ly',         |
+            |   trống → 'unsorted'                                |
+            |   Upload lúc ingest; URL lưu ở payload.url          |
+            +-----------------------------------------------------+
 ```
 
 ---
@@ -605,7 +607,9 @@ cp .env.example .env
 
 ```
 Upload → tempfile
-  → [S3] upload videos/docs to S3 (key = sha256, ACL=public-read)
+  → [S3] upload docs/<domain-slug>/<sha256>.<ext>, ACL=public-read
+         Domain slug từ s3_client.slugify_domain():
+           'Pháp lý' → 'phap-ly', '' → 'unsorted'
          → meta["url"] = public S3 URL (fallback: skip nếu S3 chưa config)
   → parse (3-tier) → doc_pipeline
   → detect tables → process (strip / describe / vision+context)
@@ -618,7 +622,8 @@ Upload → tempfile
 
 ```
 URL / File → transcribe → segments
-  → [S3] (chỉ với file local) upload videos/<sha>.<ext>, public-read
+  → [S3] (chỉ với file local) upload videos/<domain-slug>/<sha>.<ext>,
+         public-read. Cùng slug như tài liệu.
          → meta["url"] = S3 URL
   → chunk_transcript_with_timestamps → embed → Qdrant (ttt_videos)
   → payload chứa video_id, start_sec, source_url (S3 URL với local,
