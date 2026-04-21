@@ -54,6 +54,7 @@ Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5**
   |                    Qdrant Vector Database                    |
   |  +----------------+  +----------------+                      |
   |  | ttt_documents  |  | ttt_videos     |                      |
+  |  |   payload.url  |  | payload.url    |   ← public S3 URL   |
   |  +----------------+  +----------------+                      |
   |                                                              |
   |  +---------------------------------------------------------+ |
@@ -62,6 +63,14 @@ Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5**
   |  | media, qa, ttnb                                         | |
   |  +---------------------------------------------------------+ |
   +--------------------------------------------------------------+
+
+            +--------------------------------------------+
+            |   S3-compatible Object Storage             |
+            |   (AWS / Viettel IDC / MinIO / R2)         |
+            |   bucket/docs/<sha256>.pdf                 |
+            |   bucket/videos/<sha256>.mp4               |
+            |   Upload lúc ingest; URL lưu ở payload.url |
+            +--------------------------------------------+
 ```
 
 ---
@@ -314,8 +323,15 @@ User query
 [DEDUP] theo prefix text (80 ký tự) + sort theo score
     │
     ▼
-[RERANK] CrossEncoderReranker (sentence-transformers)
+[RERANK] CrossEncoderReranker (BAAI/bge-reranker-v2-m3, ~568M)
+    Auto-detect device: cuda > mps > cpu (override RERANKER_DEVICE)
+    Warmup eager-load tại FastAPI lifespan → request đầu ~35ms thay vì 5s
     Trả về top-K (mặc định 3-5)
+    │
+    ▼
+[GUARD] chain._should_refuse(hits)
+    hits rỗng hoặc top_score < 0.25 → trả refusal template cứng,
+    KHÔNG gọi Claude (tiết kiệm $ + chặn hallucinate ở gốc)
     │
     ▼
 [CONTEXT BUILD] prompt_builder.build_context_block
@@ -341,10 +357,13 @@ User query
 [PROMPT] system = DOMAIN_PERSONAS[domain] + _BASE_RULES + conv_block
     DOMAIN_PERSONAS: bim | mep | kết cấu | marketing | pháp lý | sản xuất | mặc định
     _BASE_RULES (positive framing, XML sections):
-      <language_style>   tiếng Việt, xưng "tôi"/gọi "bạn", format số VN
-      <reasoning_process> quote-first grounding (ngầm)
-      <grounding_rules>  cho phép suy luận tài liệu + dữ kiện user
-      <citation_rules>   trích TÊN, mục "Nguồn:" hoặc bỏ nếu xã giao
+      <language_style>      tiếng Việt, xưng "tôi"/gọi "bạn", format số VN
+      <reasoning_process>   quote-first grounding (ngầm) + kiểm tra fact có trong doc không
+      <grounding_rules>     STRICT — cấm Claude dùng training data cho định nghĩa/
+                            framework (4P/PDCA/SWOT)/best practice. Chỉ cho tính
+                            toán số học thuần trên số đã có trong doc hoặc user.
+      <refusal_protocol>    template cứng khi doc không đủ; không "bù" bằng kiến thức chung
+      <citation_rules>      trích TÊN, mục "Nguồn:" hoặc bỏ nếu xã giao
       <followup_suggestions> 3 câu rút từ <retrieved_documents>
     │
     ▼
@@ -462,6 +481,7 @@ trungtamtrithuc/
 │   │   ├── claude_client.py     # Anthropic messages client (sync + stream)
 │   │   ├── voyage_embed.py      # Voyage embedder (query vs document)
 │   │   ├── qdrant_store.py     # QdrantStore (R/W) + VMediaReadOnlyStore
+│   │   ├── s3_client.py         # boto3 wrapper cho S3-compatible (AWS/Viettel IDC/MinIO/R2)
 │   │   ├── session_memory.py    # Sliding window + rolling summary (file JSON)
 │   │   ├── conv_memory.py       # Vector recall Qdrant ttt_memory (cross-session)
 │   │   ├── conv_summarizer.py   # Haiku summarize rolled turns
@@ -507,6 +527,8 @@ trungtamtrithuc/
 - Python 3.12+
 - macOS Apple Silicon (M1-M4) hoặc Linux
 - RAM ≥ 16GB (Docling + embedder nạp model)
+- **GPU tuỳ chọn**: NVIDIA CUDA (Linux) hoặc Apple MPS (Mac). Reranker tự
+  detect; không có GPU vẫn chạy trên CPU.
 - `poppler` (pdf2image): `brew install poppler` / `apt install poppler-utils`
 - `ffmpeg` (nếu ingest video local với Whisper): `brew install ffmpeg`
 
@@ -519,7 +541,11 @@ pip install -r requirements.txt
 brew install poppler
 
 cp .env.example .env
-# Điền: ANTHROPIC_API_KEY, VOYAGE_API_KEY, QDRANT_URL, QDRANT_API_KEY
+# Bắt buộc: ANTHROPIC_API_KEY, VOYAGE_API_KEY, QDRANT_URL, QDRANT_API_KEY
+# Tuỳ chọn S3 (file gốc có link click tải):
+#   S3_ENDPOINT, S3_PUBLIC_ENDPOINT, S3_BUCKET_NAME,
+#   S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_REGION
+# Tuỳ chọn: RERANKER_DEVICE=cpu|cuda|mps (mặc định auto-detect)
 
 ./run.sh
 ```
@@ -566,8 +592,9 @@ cp .env.example .env
 | DOCX | Docling / python-docx |
 | XLSX | openpyxl |
 | Video transcribe | yt-dlp, youtube-transcript-api, Whisper |
-| Reranker | sentence-transformers (cross-encoder) |
+| Reranker | sentence-transformers (cross-encoder), torch (CUDA/MPS/CPU auto) |
 | Tokenizer | tiktoken (`cl100k_base`) |
+| Object storage | boto3 (S3-compatible: AWS/Viettel IDC/MinIO/R2) |
 | Frontend | HTML/CSS/JS thuần (static) |
 
 ---
@@ -577,9 +604,13 @@ cp .env.example .env
 ### 1. Ingest tài liệu
 
 ```
-Upload → tempfile → parse (3-tier) → doc_pipeline
+Upload → tempfile
+  → [S3] upload videos/docs to S3 (key = sha256, ACL=public-read)
+         → meta["url"] = public S3 URL (fallback: skip nếu S3 chưa config)
+  → parse (3-tier) → doc_pipeline
   → detect tables → process (strip / describe / vision+context)
   → typo fix → chunk → embed → Qdrant.upsert (ttt_documents)
+  → payload.url = S3 URL → chat trả link click tải file gốc + jump #page=N
   → xoá chunks cũ cùng doc_id trước khi upsert mới
 ```
 
@@ -587,8 +618,11 @@ Upload → tempfile → parse (3-tier) → doc_pipeline
 
 ```
 URL / File → transcribe → segments
+  → [S3] (chỉ với file local) upload videos/<sha>.<ext>, public-read
+         → meta["url"] = S3 URL
   → chunk_transcript_with_timestamps → embed → Qdrant (ttt_videos)
-  → payload chứa video_id, start_sec, url deep-link
+  → payload chứa video_id, start_sec, source_url (S3 URL với local,
+    YouTube URL với remote), timestamp, youtube_url kèm &t=Xs nếu YouTube
 ```
 
 ### 3. Chat (RAG answer)
@@ -598,8 +632,10 @@ POST /api/chat/
   → get history từ session_memory (file-backed)
   → RAGChain.answer(query, history, domain):
       → Retriever parallel 3 nguồn + dedup + sort
-      → CrossEncoderReranker → top 3-5
-      → build system_prompt (domain preset + base suffix)
+      → CrossEncoderReranker (GPU auto: cuda > mps > cpu) → top 3-5
+      → _should_refuse(hits): hits rỗng hoặc top_score < 0.25
+         → trả refusal template cứng, KHÔNG gọi Claude
+      → build system_prompt (domain preset + _BASE_RULES strict grounding)
       → build context_block (+ table_data)
       → Claude Sonnet 4.generate()
       → split "---GỢI Ý---" → (answer, suggestions[3])
