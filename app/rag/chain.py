@@ -12,8 +12,10 @@ from app.rag.retriever import Retriever
 from app.rag.reranker import CrossEncoderReranker
 from app.rag.prompt_builder import (
     build_system_prompt,
-    build_context_block,
+    build_documents_block,
+    build_sources_mapping,
     build_conversation_block,
+    build_user_turn,
 )
 
 _SUGGESTION_PATTERN = re.compile(
@@ -136,20 +138,20 @@ class RAGChain:
                 "refused": True,
             }
 
-        # --- 3. Build prompt: system + conversation_block + doc context
+        # --- 3. Build prompt:
+        # - system: persona + _BASE_RULES (STABLE → cache hit mọi turn sau lượt đầu)
+        # - user turn cuối: <retrieved_documents> + <user_context>/<session_summary>
+        #   + task reminder + query gốc (docs ở top, query ở bottom — long-context tip).
         system_prompt = build_system_prompt(expert_domain)
+        docs_block = build_documents_block(hits)
         conv_block = build_conversation_block(summary, recall_pairs)
-        if conv_block:
-            system_prompt = system_prompt + "\n\n" + conv_block
+        source_mapping = build_sources_mapping(hits)
 
-        context_block, source_mapping = build_context_block(hits)
-
-        # Messages: sliding window + query GỐC (không rewritten) để bot đáp đúng ý user
-        messages = list(history) + [{"role": "user", "content": query}]
+        user_turn = build_user_turn(query, docs_block, conv_block)
+        messages = list(history) + [{"role": "user", "content": user_turn}]
 
         answer_text = self.claude.generate(
             system_prompt=system_prompt,
-            context_block=context_block,
             messages=messages,
         )
 
@@ -224,12 +226,12 @@ class RAGChain:
             return
 
         system_prompt = build_system_prompt(expert_domain)
+        docs_block = build_documents_block(hits)
         conv_block = build_conversation_block(summary, recall_pairs)
-        if conv_block:
-            system_prompt = system_prompt + "\n\n" + conv_block
+        source_mapping = build_sources_mapping(hits)
 
-        context_block, source_mapping = build_context_block(hits)
-        messages = list(history) + [{"role": "user", "content": query}]
+        user_turn = build_user_turn(query, docs_block, conv_block)
+        messages = list(history) + [{"role": "user", "content": user_turn}]
 
         top_score = hits[0].score if hits else 0.0
         yield {
@@ -242,7 +244,6 @@ class RAGChain:
         buffer_parts: list[str] = []
         for chunk in self.claude.generate_stream(
             system_prompt=system_prompt,
-            context_block=context_block,
             messages=messages,
         ):
             buffer_parts.append(chunk)

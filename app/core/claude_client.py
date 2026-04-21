@@ -11,28 +11,24 @@ class ClaudeClient:
         self.model = model
         self.max_tokens = max_tokens
 
-    def _build_system(self, system_prompt: str, context_block: str) -> list[dict]:
-        system = [
+    def _build_system(self, system_prompt: str) -> list[dict]:
+        """Cache chỉ phần stable cross-turn (persona + rules).
+
+        Documents + conversation block đi vào messages (user turn), KHÔNG cache —
+        vì chúng đổi mỗi request, nếu cache thì luôn miss và phải trả 25%
+        cache-write premium mỗi turn mà không đạt read nào.
+        """
+        return [
             {
                 "type": "text",
                 "text": system_prompt,
                 "cache_control": {"type": "ephemeral"},
             }
         ]
-        if context_block:
-            system.append(
-                {
-                    "type": "text",
-                    "text": context_block,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            )
-        return system
 
     def generate(
         self,
         system_prompt: str,
-        context_block: str,
         messages: list[dict],
         max_tokens: int | None = None,
         temperature: float = 0.3,
@@ -41,7 +37,7 @@ class ClaudeClient:
         response = self.client.messages.create(
             model=model or self.model,
             max_tokens=max_tokens or self.max_tokens,
-            system=self._build_system(system_prompt, context_block),
+            system=self._build_system(system_prompt),
             messages=messages,
             temperature=temperature,
         )
@@ -50,7 +46,6 @@ class ClaudeClient:
     def generate_stream(
         self,
         system_prompt: str,
-        context_block: str,
         messages: list[dict],
         max_tokens: int | None = None,
         temperature: float = 0.3,
@@ -59,7 +54,7 @@ class ClaudeClient:
         with self.client.messages.stream(
             model=model or self.model,
             max_tokens=max_tokens or self.max_tokens,
-            system=self._build_system(system_prompt, context_block),
+            system=self._build_system(system_prompt),
             messages=messages,
             temperature=temperature,
         ) as stream:
