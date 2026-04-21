@@ -339,11 +339,17 @@ async def ingest_youtube(
             from app.ingestion.video_pipeline import ingest_youtube_playlist as _ingest_pl
             # Playlist: chỉ truyền domain (tags/title/description per-video khác nhau)
             pl_meta = {"domain": meta["domain"]} if meta.get("domain") else None
-            results = _ingest_pl(playlist_url=clean_url, metadata=pl_meta)
+            data = _ingest_pl(playlist_url=clean_url, metadata=pl_meta)
+            results = data["results"]
+            playlist_info = data.get("playlist_info") or {}
             total_ok = sum(1 for r in results if r["status"] == "ok")
             total_chunks = sum(r["chunks_added"] for r in results)
             failed = [r for r in results if r["status"] == "error"]
-            msg = f"Playlist: {total_ok}/{len(results)} video thành công, tổng {total_chunks} đoạn."
+            pl_title = playlist_info.get("playlist_title") or "playlist"
+            msg = (
+                f"Playlist '{pl_title}': {total_ok}/{len(results)} video thành công, "
+                f"tổng {total_chunks} đoạn."
+            )
             if failed:
                 msg += f" ({len(failed)} video lỗi)"
             return IngestResponse(
@@ -396,10 +402,32 @@ async def preview_youtube_metadata(url: str) -> dict:
 
     clean_url = url.strip()
     if _is_playlist_url(clean_url):
+        try:
+            from app.ingestion.youtube_fetcher import fetch_playlist_info
+            info = fetch_playlist_info(clean_url)
+        except Exception as exc:
+            logger.warning("Playlist preview fail cho %s: %s", clean_url, exc)
+            return {
+                "status": "error",
+                "message": f"Không lấy được metadata playlist: {exc}",
+                "metadata": None,
+            }
         return {
-            "status": "skip",
-            "message": "Đây là playlist. Hệ thống sẽ nạp từng video riêng, không gen metadata chung.",
-            "metadata": None,
+            "status": "ok",
+            "message": (
+                f"Playlist '{info.get('playlist_title') or '?'}' — "
+                f"{info.get('video_count', 0)} video. Metadata playlist sẽ gắn vào mọi chunk con."
+            ),
+            "metadata": {
+                "is_playlist": True,
+                "playlist_id": info.get("playlist_id", ""),
+                "playlist_title": info.get("playlist_title", ""),
+                "playlist_description": info.get("playlist_description", ""),
+                "playlist_uploader": info.get("playlist_uploader", ""),
+                "playlist_thumbnail": info.get("playlist_thumbnail", ""),
+                "video_count": info.get("video_count", 0),
+                "url": info.get("playlist_url", clean_url),
+            },
         }
 
     try:
@@ -483,12 +511,19 @@ async def ingest_youtube_playlist(url: str) -> dict:
 
     try:
         from app.ingestion.video_pipeline import ingest_youtube_playlist as _ingest_pl
-        results = _ingest_pl(playlist_url=url.strip())
+        data = _ingest_pl(playlist_url=url.strip())
+        results = data["results"]
+        playlist_info = data.get("playlist_info") or {}
         total_ok = sum(1 for r in results if r["status"] == "ok")
         total_chunks = sum(r["chunks_added"] for r in results)
+        pl_title = playlist_info.get("playlist_title") or "playlist"
         return {
             "status": "ok",
-            "message": f"Hoàn tất: {total_ok}/{len(results)} video thành công, tổng {total_chunks} đoạn.",
+            "message": (
+                f"Playlist '{pl_title}': {total_ok}/{len(results)} video thành công, "
+                f"tổng {total_chunks} đoạn."
+            ),
+            "playlist_info": playlist_info,
             "total_videos": len(results),
             "success_count": total_ok,
             "total_chunks": total_chunks,

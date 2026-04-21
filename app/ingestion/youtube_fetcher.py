@@ -238,6 +238,58 @@ def fetch_playlist_video_ids(playlist_url: str) -> list[dict]:
     return videos
 
 
+def fetch_playlist_info(playlist_url: str) -> dict:
+    """Lấy metadata playlist + danh sách videos từ yt-dlp trong 1 call.
+
+    Dùng `--flat-playlist -J` — không tải video, không cần LLM, ~1-2s.
+
+    Return:
+      {
+        "playlist_id", "playlist_title", "playlist_description",
+        "playlist_uploader", "playlist_thumbnail", "playlist_url",
+        "video_count", "videos": [{"video_id", "title"}, ...]
+      }
+    """
+    result = subprocess.run(
+        ["yt-dlp", "--flat-playlist", "-J", "--no-warnings", playlist_url],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"yt-dlp playlist error: {result.stderr[:500]}")
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"yt-dlp playlist JSON invalid: {exc}")
+
+    videos: list[dict] = []
+    for entry in data.get("entries") or []:
+        vid = (entry.get("id") or "").strip()
+        if vid and re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
+            videos.append({
+                "video_id": vid,
+                "title": (entry.get("title") or vid).strip(),
+            })
+
+    thumbs = data.get("thumbnails") or []
+    playlist_thumbnail = ""
+    for t in reversed(thumbs):
+        if t.get("url"):
+            playlist_thumbnail = t["url"]
+            break
+
+    return {
+        "playlist_id": (data.get("id") or "").strip(),
+        "playlist_title": (data.get("title") or "").strip(),
+        "playlist_description": (data.get("description") or "").strip(),
+        "playlist_uploader": (data.get("uploader") or data.get("channel") or "").strip(),
+        "playlist_thumbnail": playlist_thumbnail,
+        "playlist_url": playlist_url,
+        "video_count": len(videos),
+        "videos": videos,
+    }
+
+
 def _is_ip_block_error(exc: BaseException) -> bool:
     """Nhận diện lỗi bị YouTube chặn IP (nhiều tên class tuỳ phiên bản)."""
     name = type(exc).__name__

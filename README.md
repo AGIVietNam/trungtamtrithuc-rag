@@ -226,7 +226,7 @@ Base URL: `http://localhost:8000`
 |----------|-------|---------------|-----------|
 | `POST /api/ingest/file/preview` | multipart file | tất cả 4 field từ nội dung doc | ~2-5s |
 | `POST /api/ingest/video/file/preview` | multipart file video | tất cả 4 field từ transcript Whisper | 30s-2 phút (tuỳ Groq/local) |
-| `POST /api/ingest/youtube/preview?url=…` | query `url` | `title/description` từ YouTube (yt-dlp), `domain/tags` từ AI | 1-3s |
+| `POST /api/ingest/youtube/preview?url=…` | query `url` | Video: `title/description` từ YouTube, `domain/tags` từ AI. Playlist: `playlist_*` fields (title, uploader, video_count…) — không chạy LLM. | 1-3s |
 
 Response schema chung:
 ```json
@@ -279,16 +279,29 @@ curl -X POST "http://localhost:8000/api/ingest/youtube?url=https://www.youtube.c
 
 ### `POST /api/ingest/youtube-playlist` — Nạp playlist (chi tiết từng video)
 
+Mỗi chunk con được gắn thêm nhóm field `playlist_*` (id, title, description, uploader, thumbnail, url) lấy từ `yt-dlp --flat-playlist -J` — không LLM, không tốn chi phí. Dùng để filter/group ở `knowledge.html` hoặc query RAG theo playlist.
+
 ```json
 {
   "status": "ok",
-  "message": "Hoàn tất: 8/10 video thành công, tổng 312 đoạn.",
+  "message": "Playlist 'Khoá BIM cơ bản': 8/10 video thành công, tổng 312 đoạn.",
+  "playlist_info": {
+    "playlist_id": "PLxxxxxxxx",
+    "playlist_title": "Khoá BIM cơ bản",
+    "playlist_description": "...",
+    "playlist_uploader": "Tên kênh",
+    "playlist_thumbnail": "https://...",
+    "playlist_url": "https://www.youtube.com/playlist?list=PLxxxxxxxx",
+    "video_count": 10
+  },
   "total_videos": 10,
   "success_count": 8,
   "total_chunks": 312,
   "results": [{"video_id": "...", "status": "ok", "chunks_added": 45}]
 }
 ```
+
+`POST /api/ingest/youtube/preview` với URL playlist trả `status: ok` cùng block `metadata.is_playlist=true` + các field `playlist_*` để FE prefill card review trước khi submit.
 
 ### `POST /api/chat/` — Hỏi đáp
 

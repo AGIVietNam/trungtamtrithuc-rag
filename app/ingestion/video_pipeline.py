@@ -57,6 +57,16 @@ def ensure_collections() -> None:
     logger.info("Ensured collection: %s", config.COLLECTION_VIDEOS)
 
 
+_PLAYLIST_PAYLOAD_KEYS = (
+    "playlist_id",
+    "playlist_title",
+    "playlist_description",
+    "playlist_uploader",
+    "playlist_thumbnail",
+    "playlist_url",
+)
+
+
 def _upsert_video_chunks(
     segments: list[dict],
     video_id: str,
@@ -64,6 +74,7 @@ def _upsert_video_chunks(
     source_url: str | None,
     file_source: str,
     metadata: dict | None,
+    playlist_info: dict | None = None,
 ) -> int:
     uploaded_at = datetime.now(timezone.utc).isoformat()
     chunks = chunk_transcript_with_timestamps(segments, max_tokens=500)
@@ -118,6 +129,11 @@ def _upsert_video_chunks(
             if metadata.get("url") and not payload.get("source_url"):
                 payload["source_url"] = metadata["url"]
             payload["extra_metadata"] = metadata
+        if playlist_info:
+            for key in _PLAYLIST_PAYLOAD_KEYS:
+                val = playlist_info.get(key)
+                if val:
+                    payload[key] = val
         points.append({"id": point_id, "vector": vector, "payload": payload})
 
     store.upsert(points)
@@ -167,6 +183,7 @@ def ingest_video_file(
 def ingest_youtube(
     url: str,
     metadata: dict | None = None,
+    playlist_info: dict | None = None,
 ) -> IngestResult:
     from app.ingestion.youtube_fetcher import (
         fetch_youtube_transcript, fetch_youtube_via_whisper,
@@ -194,6 +211,7 @@ def ingest_youtube(
         source_url=data["source_url"],
         file_source="youtube",
         metadata=metadata,
+        playlist_info=playlist_info,
     )
     return IngestResult(
         doc_id=data["video_id"],
@@ -206,17 +224,29 @@ def ingest_youtube(
 def ingest_youtube_playlist(
     playlist_url: str,
     metadata: dict | None = None,
-) -> list[dict]:
+) -> dict:
     """Ingest all videos from a YouTube playlist, one by one.
 
-    Returns a list of per-video results:
-      [{"video_id": ..., "title": ..., "status": "ok"|"error", "chunks_added": int, "error": str|None}, ...]
+    Returns:
+      {
+        "playlist_info": {"playlist_id", "playlist_title", ...},  # không kèm "videos"
+        "results": [{"video_id", "title", "status", "chunks_added", "error"}, ...]
+      }
     """
-    from app.ingestion.youtube_fetcher import fetch_playlist_video_ids
+    from app.ingestion.youtube_fetcher import fetch_playlist_info
 
     logger.info("Fetching playlist: %s", playlist_url)
-    videos = fetch_playlist_video_ids(playlist_url)
-    logger.info("Found %d videos in playlist", len(videos))
+    info = fetch_playlist_info(playlist_url)
+    videos = info.get("videos") or []
+    logger.info(
+        "Playlist '%s' (%s): %d videos",
+        info.get("playlist_title") or "(no title)",
+        info.get("playlist_id") or "?",
+        len(videos),
+    )
+
+    # Stub gắn vào payload con — loại "videos" để tránh nhồi danh sách lớn.
+    playlist_payload = {k: v for k, v in info.items() if k != "videos" and v}
 
     results = []
     for i, v in enumerate(videos, 1):
@@ -227,6 +257,7 @@ def ingest_youtube_playlist(
             r = ingest_youtube(
                 url=f"https://www.youtube.com/watch?v={vid}",
                 metadata=metadata,
+                playlist_info=playlist_payload or None,
             )
             results.append({
                 "video_id": vid,
@@ -245,4 +276,4 @@ def ingest_youtube_playlist(
                 "error": str(exc),
             })
 
-    return results
+    return {"playlist_info": playlist_payload, "results": results}
