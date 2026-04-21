@@ -9,6 +9,7 @@ from fastapi import APIRouter, File, Form, UploadFile
 from app.schemas import IngestResponse
 from app.ingestion.doc_pipeline import ingest_document, ensure_collections
 from app.ingestion.metadata_generator import generate_document_metadata
+from app.core import s3_client
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,17 @@ async def ingest_file(
         meta["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
     if url.strip():
         meta["url"] = url.strip()
+
+    # Upload file gốc lên S3 → user click link tải về xem bản gốc
+    if s3_client.is_configured():
+        try:
+            s3_url = s3_client.upload_file(
+                tmp_path, prefix=s3_client.PREFIX_DOCS,
+                original_name=file.filename,
+            )
+            meta["url"] = s3_url  # override: S3 là source of truth cho file đã upload
+        except Exception:
+            logger.warning("S3 upload failed for %s — ingest continues without source_url", file.filename, exc_info=True)
 
     try:
         result = ingest_document(
@@ -210,6 +222,17 @@ async def ingest_video_file(
         tmp_path = tmp.name
 
     meta = _build_metadata_dict(title, domain, description, tags, url)
+
+    # Upload video gốc lên S3 → user click link phát trực tiếp (ACL public-read)
+    if s3_client.is_configured():
+        try:
+            s3_url = s3_client.upload_file(
+                tmp_path, prefix=s3_client.PREFIX_VIDEOS,
+                original_name=file.filename,
+            )
+            meta["url"] = s3_url
+        except Exception:
+            logger.warning("S3 upload failed for %s — ingest continues without source_url", file.filename, exc_info=True)
 
     try:
         from app.ingestion.video_pipeline import ingest_video_file as _ingest_video

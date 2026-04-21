@@ -20,5 +20,10 @@ youtube-transcript-api
 # openai-whisper  # optional — heavy dependency, uncomment if needed
 tiktoken
 numpy
+# PyTorch: trên Linux mặc định pip sẽ kéo bản CUDA (auto dùng GPU NVIDIA nếu có).
+# Trên macOS mặc định có MPS (GPU Apple Silicon).
+# CPU fallback khi không có GPU. Override: RERANKER_DEVICE=cpu/cuda/mps
+torch>=2.4
 sentence-transformers
 pytest-asyncio
+boto3
