@@ -97,6 +97,65 @@ score < 0.40   → "Thấp"
 
 ---
 
+### POST /api/chat/stream
+
+SSE streaming — cùng schema request với `/api/chat/`, response là `text/event-stream`. Dùng cho UX render token dần trong bubble chat.
+
+**Request:** giống `/api/chat/`.
+
+**Response:** `Content-Type: text/event-stream`. Mỗi event format `data: <json>\n\n`, `type` thuộc:
+
+| Event | Khi nào | Payload chính |
+|-------|---------|---------------|
+| `meta` | Sau retrieval + rerank, trước khi LLM sinh token | `confidence`, `rewritten_query`, `recall_count` |
+| `delta` | Mỗi chunk Claude stream về | `text` — client nối tiếp vào bubble đang hiện |
+| `done` | Generation xong | `answer` (đã strip `---GỢI Ý---`), `sources` (nếu trích "Nguồn:"), `suggested_questions` |
+| `error` | Exception trong chain | `message` |
+
+> FE nên ẩn phần text sau marker `---GỢI Ý---` trong các event `delta` (split `/\n*---GỢI Ý---/`), sau đó render bubble cuối dùng `answer` từ event `done` để không lộ marker thô.
+
+**Ví dụ JS (fetch + ReadableStream):**
+
+```js
+const res = await fetch('/api/chat/stream', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({
+    message, session_id, user_id, domain, history: [],
+  }),
+});
+const reader = res.body.getReader();
+const decoder = new TextDecoder();
+let buffer = '';
+let text = '';
+while (true) {
+  const {value, done} = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, {stream: true});
+  let idx;
+  while ((idx = buffer.indexOf('\n\n')) >= 0) {
+    const raw = buffer.slice(0, idx);
+    buffer = buffer.slice(idx + 2);
+    for (const line of raw.split('\n')) {
+      if (!line.startsWith('data:')) continue;
+      const evt = JSON.parse(line.slice(5).trim());
+      if (evt.type === 'delta') {
+        text += evt.text;
+        renderStream(text.split(/\n*---GỢI Ý---/)[0]);
+      } else if (evt.type === 'done') {
+        renderFinal(evt.answer, evt.sources, evt.suggested_questions);
+      } else if (evt.type === 'error') {
+        throw new Error(evt.message);
+      }
+    }
+  }
+}
+```
+
+> Proxy lưu ý: server đã set `X-Accel-Buffering: no`, nhưng nếu đặt sau CDN/proxy khác cần tắt compression và buffering cho route này (nginx: `proxy_buffering off`, `proxy_cache off`).
+
+---
+
 ### POST /api/ingest/file
 
 Upload tài liệu (PDF/DOCX/TXT/MD) hoặc video (MP4/MKV/MOV/AVI).

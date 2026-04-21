@@ -170,7 +170,7 @@ trungtamtrithuc/
 │   ├── config.py               # Biến môi trường
 │   ├── schemas.py              # Pydantic I/O
 │   ├── api/
-│   │   ├── chat.py             # POST /api/chat/
+│   │   ├── chat.py             # POST /api/chat/ (JSON) + /api/chat/stream (SSE)
 │   │   └── ingest.py           # POST /api/ingest/{file,video/file,youtube,youtube-playlist}
 │   ├── core/
 │   │   ├── chunker.py          # Heading-aware chunking (tiktoken)
@@ -345,6 +345,51 @@ const res = await fetch('/api/chat/', {
 });
 const {answer, sources, suggested_questions} = await res.json();
 ```
+
+### `POST /api/chat/stream` — Hỏi đáp (SSE streaming)
+
+Cùng schema `ChatRequest` như `/api/chat/`, nhưng response là `text/event-stream`. Mỗi event theo format `data: <json>\n\n` với `type` thuộc một trong:
+
+| Event | Khi nào | Payload |
+|-------|---------|---------|
+| `meta` | Ngay sau khi retrieval + rerank xong | `confidence`, `rewritten_query` (nếu khác query gốc), `recall_count` |
+| `delta` | Mỗi token Claude sinh ra | `text` — chunk text cộng dồn phía client |
+| `done` | Kết thúc generation | `answer` (đã tách `---GỢI Ý---`), `sources` (nếu bot trích "Nguồn:"), `suggested_questions` |
+| `error` | Chain raise exception | `message` |
+
+Background memory update (`session_memory` + `ttt_memory` upsert) chạy sau khi stream đóng, dùng `answer` clean từ event `done`.
+
+**Ví dụ JS:**
+
+```js
+const res = await fetch('/api/chat/stream', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({message, session_id, user_id, domain, history: []}),
+});
+const reader = res.body.getReader();
+const decoder = new TextDecoder();
+let buffer = '';
+while (true) {
+  const {value, done} = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, {stream: true});
+  let idx;
+  while ((idx = buffer.indexOf('\n\n')) >= 0) {
+    const raw = buffer.slice(0, idx);
+    buffer = buffer.slice(idx + 2);
+    for (const line of raw.split('\n')) {
+      if (line.startsWith('data:')) {
+        const evt = JSON.parse(line.slice(5).trim());
+        if (evt.type === 'delta') appendToken(evt.text);
+        else if (evt.type === 'done') renderFinal(evt.answer, evt.sources, evt.suggested_questions);
+      }
+    }
+  }
+}
+```
+
+Nginx proxy lưu ý: header `X-Accel-Buffering: no` đã được gắn, nhưng nếu dùng proxy khác cần tắt buffering/compression cho route này.
 
 ### `DELETE /api/chat/memory/user/{user_id}` — Xoá toàn bộ conv memory của 1 user
 

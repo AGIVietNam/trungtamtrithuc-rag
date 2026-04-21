@@ -455,7 +455,7 @@ trungtamtrithuc/
 │   ├── config.py                # Env vars (Voyage, Qdrant, Claude, Proxy)
 │   ├── schemas.py               # ChatRequest/Response, Ingest, KnowledgeSearch
 │   ├── api/
-│   │   ├── chat.py              # POST /api/chat/
+│   │   ├── chat.py              # POST /api/chat/ (JSON) + /api/chat/stream (SSE)
 │   │   └── ingest.py            # POST /api/ingest/{file,video/file,youtube,youtube-playlist}
 │   ├── core/
 │   │   ├── chunker.py           # Heading-aware chunking (tiktoken cl100k_base)
@@ -610,7 +610,7 @@ POST /api/chat/
 
 ## Hướng phát triển
 
-- **Streaming response** — chain đã có `answer_stream()` (SSE-ready), cần wire `/api/chat/stream`.
+- ~~**Streaming response**~~ ✅ Đã wire `POST /api/chat/stream` (SSE). `RAGChain.answer_stream()` chạy đầy đủ flow (rewrite → retrieve/recall → rerank → stream) và emit events `meta`/`delta`/`done`/`error`. FE `web/chat.html` render token dần, replace bubble ở event `done` với sources + suggested_questions. Background memory update chạy sau khi stream đóng.
 - **Auth thật** — hiện `user_id` là string tự do client truyền; tích hợp đăng nhập để verify + chống impersonate memory của user khác.
 - **User profile extract** — tách fact cá nhân (tên, team, ngân sách, preference) ra block riêng thay vì lẫn trong recall pairs — tăng độ bền trước khi recall score rơi dưới threshold.
 - **Admin CRUD knowledge** — delete/re-index tài liệu từ `knowledge.html`.
