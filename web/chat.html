@@ -388,7 +388,13 @@
               ? `<a href="${href}" target="_blank" rel="noopener" class="pos-tag">&#9654; ${ts}</a>`
               : `<span class="pos-tag">&#9654; ${ts}</span>`;
           }
-          if (p.page != null) return `<span class="pos-tag">&#128196; Trang ${escapeHTML(String(p.page))}</span>`;
+          if (p.page != null) {
+            const pageNum = escapeHTML(String(p.page));
+            const pageHref = baseHref ? `${baseHref}#page=${encodeURIComponent(p.page)}` : '';
+            return pageHref
+              ? `<a href="${pageHref}" target="_blank" rel="noopener" class="pos-tag">&#128196; Trang ${pageNum}</a>`
+              : `<span class="pos-tag">&#128196; Trang ${pageNum}</span>`;
+          }
           return '';
         }).filter(Boolean).join('');
         if (tags) posHTML = `<div class="flex flex-wrap gap-1 mt-1">${tags}</div>`;
@@ -399,7 +405,12 @@
           : `<span class="pos-tag">&#9654; ${ts}</span>`;
         posHTML = `<div class="flex flex-wrap gap-1 mt-1">${tag}</div>`;
       } else if (src.page != null) {
-        posHTML = `<div class="flex flex-wrap gap-1 mt-1"><span class="pos-tag">&#128196; Trang ${escapeHTML(String(src.page))}</span></div>`;
+        const pageNum = escapeHTML(String(src.page));
+        const pageHref = baseHref ? `${baseHref}#page=${encodeURIComponent(src.page)}` : '';
+        const tag = pageHref
+          ? `<a href="${pageHref}" target="_blank" rel="noopener" class="pos-tag">&#128196; Trang ${pageNum}</a>`
+          : `<span class="pos-tag">&#128196; Trang ${pageNum}</span>`;
+        posHTML = `<div class="flex flex-wrap gap-1 mt-1">${tag}</div>`;
       }
 
       const titleHTML = baseHref
