@@ -102,7 +102,23 @@ cp .env.example .env            # điền API keys (xem bảng bên dưới)
 | `CHUNK_OVERLAP_TOKENS` | `80` | Overlap giữa các chunk |
 | `TOP_K` | `7` | Số hit trước rerank |
 | `RERANK_TOP_K` | `5` | Số hit sau rerank |
+| `RERANKER_DEVICE` | auto | Ép device cho cross-encoder: `cpu`/`cuda`/`mps`. Mặc định auto-detect (CUDA > MPS > CPU). |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | |
+
+### Storage (S3-compatible) — tuỳ chọn
+
+Dùng cho ingest file/video: upload file gốc lên S3 → `payload.url` trong Qdrant là public URL → chat trả về link click tải file / nhảy đúng trang PDF. Thiếu các biến này thì ingest vẫn chạy, chỉ không có link gốc.
+
+| Biến | Mô tả |
+|------|-------|
+| `S3_ENDPOINT` | URL API S3 (vd `https://s3-north1.viettelidc.com.vn`). Tương thích AWS S3, MinIO, Viettel IDC, Cloudflare R2... |
+| `S3_PUBLIC_ENDPOINT` | URL hiển thị cho user (thường giống `S3_ENDPOINT`). |
+| `S3_BUCKET_NAME` | Tên bucket (vd `knowledge-center`). |
+| `S3_ACCESS_KEY_ID` | Access key. |
+| `S3_SECRET_ACCESS_KEY` | Secret key. |
+| `S3_REGION` | Region label, mặc định `us-east-1`. |
+
+Object key theo format `docs/<sha256>.<ext>` hoặc `videos/<sha256>.<ext>` — deterministic, cùng nội dung → cùng key (idempotent, không duplicate storage). ACL `public-read` tự set per-object.
 
 ### Conversation Memory (Hybrid 3 tầng)
 
@@ -469,11 +485,24 @@ Trên UI `chat.html`: dropdown "User đang test" cho phép switch giữa `test-u
 `app/rag/prompt_builder.py` áp dụng best practices Anthropic cho Claude 4+:
 
 - **XML tags** (`<retrieved_documents>`, `<user_context>`, `<session_summary>`) thay cho markdown headers → parse boundary chắc chắn.
-- **Positive framing** — mô tả "Bạn được phép X" thay vì "Không làm Y". Mô hình bám rule tốt hơn.
-- **Quote-first grounding** — yêu cầu Claude ngầm xác định đoạn tài liệu liên quan trước khi tổng hợp (giảm hallucination).
-- **Reasoning lane** — cho phép suy luận khi kết hợp tài liệu với dữ kiện user đã khai (vd tính `80tr / 6 video = 13,3 tr/video`).
+- **Strict grounding** — cấm Claude dùng training data cho định nghĩa/khái niệm/best practice ngoài tài liệu. Chỉ cho tính toán số học thuần trên số user/tài liệu đã cung cấp.
+- **`<refusal_protocol>`** — template cứng khi không có context liên quan: bot trả đúng 1 câu refusal, không bịa "bù" bằng kiến thức chung.
+- **Pre-LLM guard** (`chain.py`) — top rerank score < `0.25` hoặc không có hit → trả refusal cứng, **không gọi Claude** (tiết kiệm $ + chặn hallucination ở gốc).
+- **Quote-first grounding** — yêu cầu Claude ngầm xác định đoạn tài liệu liên quan trước khi tổng hợp.
 - **Vietnamese tone** — xưng "tôi", gọi "bạn", giữ thuật ngữ EN, format số theo VN (`1.000.000 đồng`, `13,3 triệu`).
 - **Follow-up suggestion** — rút trực tiếp từ `<retrieved_documents>` vừa dùng, không generic theo domain.
+
+## Performance — Reranker GPU
+
+Cross-encoder `BAAI/bge-reranker-v2-m3` (~560M params) chạy local để rerank hit Qdrant. Auto-detect device theo thứ tự `cuda` > `mps` > `cpu`:
+
+| Môi trường | Device | Latency (5 pairs, steady-state) |
+|------------|--------|---------------------------------|
+| Mac Apple Silicon M1-M4 | `mps` (Metal) | ~35ms |
+| Cloud NVIDIA GPU (T4/A10G/...) | `cuda` | ~20-40ms |
+| Cloud CPU thường | `cpu` | ~1-2s |
+
+Warmup eager-load model lúc FastAPI startup (qua `lifespan` event) → request chat đầu tiên sau restart không còn gánh 3-5s cold load. Override bằng env `RERANKER_DEVICE=cpu|cuda|mps`.
 
 Ref: [Anthropic XML tags guide](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/use-xml-tags) · [Claude 4 best practices](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/claude-4-best-practices)
 
