@@ -1,0 +1,344 @@
+from __future__ import annotations
+
+import logging
+import re
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+from app.core import config
+from app.core.chunker import chunk_text
+from app.core.voyage_embed import VoyageEmbedder
+from app.core.qdrant_store import QdrantStore
+from app.ingestion.doc_parser import parse, _fix_common_typos
+
+logger = logging.getLogger(__name__)
+
+_LOG_DIR = config.DATA_DIR / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+_file_handler = logging.FileHandler(
+    _LOG_DIR / f"ingest-{datetime.now().strftime('%Y%m%d')}.log",
+    encoding="utf-8",
+)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+logging.getLogger().addHandler(_file_handler)
+
+
+# Prompt: short table summary (2-3 sentences, for search)
+TABLE_DESCRIBE_PROMPT = (
+    "Viết TÓM TẮT NGẮN (2-3 câu) về bảng Markdown dưới đây.\n"
+    "Chỉ nêu bảng chứa gì, bao nhiêu mục, thông tin chính.\n"
+    "VD: 'Bảng phân nhóm nhân sự gồm 3 nhóm: Khối Văn phòng 30%, "
+    "Ban chỉ huy công trình 40%, Công nhân cơ hữu 30%.'\n"
+    "Quy tắc:\n"
+    "- Tối đa 3 câu.\n"
+    "- Giữ chính xác tên riêng, số liệu.\n"
+    "- KHÔNG dùng Markdown (**, ##, `, |).\n"
+    "- Chỉ trả về plain text.\n"
+)
+
+# Prompt: Vision with document context
+VISION_WITH_CONTEXT_PROMPT = (
+    "Bạn đang đọc MỘT TRANG trong tài liệu. Dưới đây là NGỮ CẢNH từ các trang khác:\n"
+    "---\n{context}\n---\n\n"
+    "Hãy đọc hình ảnh trang này và viết lại NỘI DUNG thành plain text có cấu trúc.\n"
+    "Yêu cầu:\n"
+    "- Hiểu trang này trong ngữ cảnh tài liệu tổng thể ở trên.\n"
+    "- Dòng đầu: mô tả ngắn trang này chứa gì, thuộc phần nào của tài liệu.\n"
+    "- Nếu có bảng: mỗi dòng dữ liệu viết thành 1 dòng text riêng.\n"
+    "- Nếu ô có màu mang ý nghĩa (xanh=hoàn thành, cam=đang làm, đỏ=quan trọng):\n"
+    "  → Ghi gắn với dữ liệu. VD: 'Tất niên (T1-T2): đã hoàn thành.'\n"
+    "- Bỏ qua cột/ô trống.\n"
+    "- Giữ chính xác tên riêng, số liệu, tiếng Việt có dấu.\n"
+    "- KHÔNG dùng Markdown (**, ##, `, |, ---).\n"
+    "- KHÔNG mô tả format, font, kiểu bảng.\n"
+    "- Chỉ trả về plain text.\n"
+)
+
+
+@dataclass
+class IngestResult:
+    doc_id: str
+    num_chunks: int
+    num_pages: int
+    source_name: str
+
+
+def ensure_collections() -> None:
+    import requests
+
+    store = QdrantStore(
+        url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY,
+        collection=config.COLLECTION_DOCS, vector_size=config.VOYAGE_DIM,
+    )
+    store.ensure_collection()
+
+    try:
+        requests.put(
+            f"{store.url}/collections/{store.collection}/index",
+            headers=store._headers(),
+            json={"field_name": "doc_id", "field_schema": "keyword"},
+            timeout=30,
+        )
+    except Exception:
+        logger.warning("Could not create doc_id index")
+
+    logger.info("Ensured collection: %s", config.COLLECTION_DOCS)
+
+
+# --- Table detection & processing ---
+
+def _is_table_line(line: str) -> bool:
+    s = line.strip()
+    return (s.startswith("|") and s.endswith("|")) or bool(re.match(r"^\s*\|[\s\-:|]+\|\s*$", s))
+
+
+def _has_markdown_tables(text: str) -> bool:
+    return bool(re.search(r"\|-{2,}", text))
+
+
+def _extract_tables_and_text(markdown: str) -> tuple[str, list[str]]:
+    """Split markdown into text parts and individual tables."""
+    lines = markdown.split("\n")
+    text_lines: list[str] = []
+    tables: list[str] = []
+    current_table: list[str] = []
+    in_table = False
+
+    for line in lines:
+        if _is_table_line(line):
+            in_table = True
+            current_table.append(line)
+        else:
+            if in_table:
+                tables.append("\n".join(current_table))
+                current_table = []
+                in_table = False
+            text_lines.append(line)
+
+    if current_table:
+        tables.append("\n".join(current_table))
+
+    return "\n".join(text_lines).strip(), tables
+
+
+def _table_empty_cell_ratio(table_md: str) -> float:
+    lines = [l for l in table_md.strip().split("\n")
+             if l.strip().startswith("|") and l.strip().endswith("|")
+             and not re.match(r"^\s*\|[\s\-:|]+\|\s*$", l)]
+    total = 0
+    empty = 0
+    for line in lines:
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        total += len(cells)
+        empty += sum(1 for c in cells if not c.strip())
+    return empty / total if total > 0 else 0
+
+
+def _strip_markdown_formatting(text: str) -> str:
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"_(.+?)_", r"\1", text)
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^-{3,}$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"`(.+?)`", r"\1", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _llm_describe_table(table_md: str) -> str:
+    """Short LLM description of table (2-3 sentences)."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model=config.CLAUDE_HAIKU_MODEL, max_tokens=512,
+            system=TABLE_DESCRIBE_PROMPT,
+            messages=[{"role": "user", "content": table_md}],
+            temperature=0.1,
+        )
+        result = response.content[0].text.strip()
+        return _fix_common_typos(result)
+    except Exception:
+        logger.exception("LLM table describe failed")
+        return ""
+
+
+def _vision_with_context(pdf_path: Path, context_text: str) -> str:
+    """Vision for PDF pages with document context."""
+    from app.ingestion.doc_parser import (
+        _get_anthropic_client, _pdf_page_to_base64,
+        _count_pdf_pages, _fix_common_typos,
+    )
+    from app.config import CLAUDE_HAIKU_MODEL
+
+    client = _get_anthropic_client()
+    if client is None:
+        return ""
+
+    num_pages = _count_pdf_pages(pdf_path)
+    short_context = context_text[:2000] if len(context_text) > 2000 else context_text
+    prompt = VISION_WITH_CONTEXT_PROMPT.format(context=short_context)
+
+    all_text: list[str] = []
+    for page_num in range(1, num_pages + 1):
+        image_b64 = _pdf_page_to_base64(pdf_path, page_num)
+        if not image_b64:
+            continue
+        try:
+            response = client.messages.create(
+                model=CLAUDE_HAIKU_MODEL, max_tokens=4096, temperature=0.1,
+                messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_b64}},
+                    {"type": "text", "text": prompt},
+                ]}],
+            )
+            result = response.content[0].text.strip()
+            result = _fix_common_typos(result)
+            if result:
+                all_text.append(result)
+                logger.info("Vision+context page %d: %d chars", page_num, len(result))
+        except Exception:
+            logger.exception("Vision+context failed for page %d", page_num)
+
+    return "\n\n".join(all_text)
+
+
+def _process_content(text: str) -> tuple[str, str, bool]:
+    """Process content into (embed_text, table_data, needs_vision).
+
+    - Text only → strip formatting, no LLM
+    - Table with data (<50% empty) → keep in table_data, LLM summary for embed
+    - Table with empty cells (>50%) → discard, needs Vision
+    """
+    if not _has_markdown_tables(text):
+        clean = _strip_markdown_formatting(text)
+        return clean, "", False
+
+    text_part, tables = _extract_tables_and_text(text)
+    text_part = _strip_markdown_formatting(text_part)
+
+    good_tables: list[str] = []
+    needs_vision = False
+
+    for table_md in tables:
+        empty_ratio = _table_empty_cell_ratio(table_md)
+        if empty_ratio > 0.5:
+            logger.info("Table discarded: %.0f%% empty cells (needs Vision)", empty_ratio * 100)
+            needs_vision = True
+        else:
+            good_tables.append(table_md)
+
+    table_data = "\n\n".join(good_tables)
+    table_desc = _llm_describe_table(table_data) if good_tables else ""
+
+    parts = [p for p in [text_part, table_desc] if p]
+    embed_text = "\n\n".join(parts)
+
+    return embed_text, table_data, needs_vision
+
+
+# --- Main ingest ---
+
+def ingest_document(
+    file_path: str,
+    original_name: str,
+    metadata: dict | None = None,
+) -> IngestResult:
+    path = Path(file_path)
+    logger.info("Ingesting document: %s", original_name)
+
+    parsed = parse(path)
+    doc_id = parsed["doc_id"]
+    uploaded_at = parsed["uploaded_at"]
+    content = parsed["content"]
+
+    # Delete old chunks before re-ingesting
+    store_cleanup = QdrantStore(
+        url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY,
+        collection=config.COLLECTION_DOCS, vector_size=config.VOYAGE_DIM,
+    )
+    try:
+        store_cleanup.delete_by_filter({
+            "must": [{"key": "doc_id", "match": {"value": doc_id}}]
+        })
+        logger.info("Deleted old chunks for doc_id=%s", doc_id)
+    except Exception:
+        logger.warning("Could not delete old chunks for doc_id=%s", doc_id)
+
+    # Flatten pages
+    if isinstance(content, list):
+        page_texts = [(item["page"], item["text"]) for item in content if item["text"].strip()]
+    else:
+        page_texts = [(1, content)]
+
+    num_pages = len(page_texts)
+    embedder = VoyageEmbedder(api_key=config.VOYAGE_API_KEY, model=config.VOYAGE_MODEL)
+    store = QdrantStore(
+        url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY,
+        collection=config.COLLECTION_DOCS, vector_size=config.VOYAGE_DIM,
+    )
+
+    all_points: list[dict] = []
+    chunk_index = 0
+
+    for page_num, text in page_texts:
+        embed_text, table_data, needs_vision = _process_content(text)
+
+        # Vision with context for tables with empty cells (colors)
+        if needs_vision:
+            logger.info("Page %d: tables with empty cells, calling Vision with context", page_num)
+            vision_text = _vision_with_context(path, embed_text)
+            if vision_text:
+                embed_text = embed_text + "\n\n" + vision_text if embed_text else vision_text
+
+        chunks = chunk_text(embed_text, max_tokens=config.CHUNK_MAX_TOKENS, overlap_tokens=config.CHUNK_OVERLAP_TOKENS)
+        chunks = [c for c in chunks if c.text.strip() and c.token_count >= 10]
+        if not chunks:
+            continue
+
+        texts = [c.text for c in chunks]
+        vectors = embedder.embed_documents(texts)
+
+        for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}-{chunk_index}"))
+            payload: dict = {
+                "source_type": "document",
+                "doc_id": doc_id,
+                "source_name": original_name,
+                "page": page_num,
+                "chunk_index": chunk_index,
+                "text": chunk.text,
+                "heading_path": chunk.heading_path,
+                "uploaded_at": uploaded_at,
+            }
+            if table_data and i == 0:
+                payload["table_data"] = table_data
+            # Store searchable metadata fields at top level
+            if metadata:
+                if metadata.get("domain"):
+                    payload["domain"] = metadata["domain"]
+                if metadata.get("title"):
+                    payload["title"] = metadata["title"]
+                if metadata.get("description"):
+                    payload["description"] = metadata["description"]
+                if metadata.get("tags"):
+                    payload["tags"] = metadata["tags"]
+                if metadata.get("url"):
+                    payload["url"] = metadata["url"]
+                payload["extra_metadata"] = metadata
+            all_points.append({"id": point_id, "vector": vector, "payload": payload})
+            chunk_index += 1
+
+        logger.info("Page %d: %d chunks, table_data=%s, vision=%s",
+                     page_num, len(chunks), bool(table_data), needs_vision)
+
+    store.upsert(all_points)
+    logger.info("Ingested %s: doc_id=%s pages=%d chunks=%d",
+                original_name, doc_id, num_pages, chunk_index)
+    return IngestResult(doc_id=doc_id, num_chunks=chunk_index,
+                        num_pages=num_pages, source_name=original_name)

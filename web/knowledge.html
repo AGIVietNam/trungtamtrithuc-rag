@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html class="light" lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta content="width=device-width, initial-scale=1.0" name="viewport" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<title>Kho Tri Thức — Trung Tâm Tri Thức</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+<script>
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "on-surface-variant": "#464555",
+          "surface-container-low": "#f2f3ff",
+          "surface-container-high": "#e2e7ff",
+          "surface-container-lowest": "#ffffff",
+          "surface-bright": "#faf8ff",
+          "background": "#faf8ff",
+          "error": "#ba1a1a",
+          "outline": "#777587",
+          "secondary-container": "#fea619",
+          "on-secondary-container": "#684000",
+          "primary-container": "#4f46e5",
+          "primary-fixed": "#e2dfff",
+          "primary": "#3525cd",
+          "primary-fixed-dim": "#c3c0ff",
+          "surface-container": "#eaedff",
+          "outline-variant": "#c7c4d8",
+          "surface-container-highest": "#dae2fd",
+          "surface-variant": "#dae2fd",
+          "on-surface": "#131b2e",
+          "on-primary": "#ffffff",
+          "surface": "#faf8ff",
+          "on-primary-fixed-variant": "#3323cc",
+          "on-primary-fixed": "#0f0069",
+        },
+        borderRadius: { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" },
+        fontFamily: {
+          "headline": ["Manrope", "sans-serif"],
+          "body": ["Inter", "sans-serif"],
+          "mono": ["JetBrains Mono", "monospace"],
+        },
+      },
+    },
+  };
+</script>
+<style>
+  .ghost-border { border: 1px solid rgba(199,196,216,0.15); }
+  .ambient-shadow { box-shadow: 0px 12px 32px -4px rgba(15,23,42,0.08); }
+  .gradient-text { background: linear-gradient(135deg,#3525cd,#4f46e5); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+</style>
+</head>
+<body class="bg-background text-on-surface font-body antialiased min-h-screen flex flex-col relative overflow-x-hidden">
+
+<!-- Ambient bg -->
+<div class="fixed inset-0 pointer-events-none z-[-1] overflow-hidden">
+  <div class="absolute top-[-10%] right-[-5%] w-[500px] h-[500px] rounded-full bg-primary-fixed-dim/20 blur-[120px]"></div>
+</div>
+
+<!-- Top nav -->
+<header class="flex justify-between items-center w-full px-6 py-3 bg-surface-container-low sticky top-0 z-50">
+  <a class="flex items-center gap-2 text-xl font-headline font-bold text-on-surface tracking-tight" href="index.html">
+    <span class="material-symbols-outlined text-primary" style="font-variation-settings: 'FILL' 1;">book</span>
+    <span>Trung Tâm Tri Thức</span>
+  </a>
+  <nav class="hidden md:flex items-center gap-8">
+    <a class="text-on-surface-variant hover:text-on-surface transition-colors pb-1" href="index.html">Trang chủ</a>
+    <a class="text-on-surface-variant hover:text-on-surface transition-colors pb-1" href="chat.html">Chat</a>
+    <a class="text-on-surface-variant hover:text-on-surface transition-colors pb-1" href="ingest.html">Nạp dữ liệu</a>
+    <a class="text-primary font-bold border-b-2 border-primary pb-1" href="knowledge.html">Kho tri thức</a>
+  </nav>
+  <a class="inline-flex items-center gap-2 bg-gradient-to-br from-primary to-primary-container text-on-primary font-medium px-4 py-2 rounded-lg hover:shadow-[0_8px_20px_-4px_rgba(53,37,205,0.4)] transition-all text-sm" href="ingest.html">
+    <span class="material-symbols-outlined text-[18px]">upload</span>
+    <span class="hidden sm:inline">Tải tài liệu</span>
+  </a>
+</header>
+
+<main class="flex-1 w-full max-w-6xl mx-auto px-6 py-10">
+  <header class="mb-8">
+    <h1 class="font-headline text-3xl md:text-4xl font-extrabold text-on-surface tracking-tight mb-2">Kho Tri Thức</h1>
+    <p class="text-on-surface-variant">Tổng quan các collection dữ liệu đã nạp vào hệ thống RAG.</p>
+  </header>
+
+  <!-- Stats row -->
+  <section class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8" id="stats">
+    <div class="bg-surface-container-lowest p-5 rounded-xl ambient-shadow ghost-border flex flex-col justify-between h-32 relative overflow-hidden">
+      <div class="text-on-surface-variant text-sm font-medium">Đang tải…</div>
+      <div class="font-headline font-extrabold text-3xl text-on-surface-variant">—</div>
+    </div>
+  </section>
+
+  <!-- Section title -->
+  <div class="flex items-center justify-between mb-4">
+    <h2 class="font-headline text-xl font-bold text-on-surface">Collections</h2>
+    <div class="text-xs font-mono text-on-surface-variant" id="colCount"></div>
+  </div>
+
+  <!-- Collections grid -->
+  <section class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="collections">
+    <div class="bg-surface-container-lowest p-6 rounded-xl ghost-border text-center text-on-surface-variant text-sm">
+      Đang tải collections…
+    </div>
+  </section>
+</main>
+
+<footer class="w-full bg-surface-container-low py-6 px-6 mt-auto">
+  <div class="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-3 text-xs text-on-surface-variant/80 font-mono">
+    <span>© 2026 Trung Tâm Tri Thức</span>
+    <span>Enterprise RAG · Qdrant vector store</span>
+  </div>
+</footer>
+
+<script>
+  const COLLECTION_META = {
+    ttt_documents: { label: 'Tài liệu', icon: 'description', color: 'text-primary', bg: 'bg-surface-container-high' },
+    ttt_videos:    { label: 'Video',    icon: 'movie',       color: 'text-primary', bg: 'bg-surface-container-high' },
+    ttt_memory:    { label: 'Chat memory', icon: 'memory',   color: 'text-primary', bg: 'bg-surface-container-high' },
+  };
+
+  function metaFor(name) {
+    return COLLECTION_META[name] || { label: name, icon: 'folder', color: 'text-primary', bg: 'bg-surface-container-high' };
+  }
+
+  function fmtNumber(n) {
+    return (n || 0).toLocaleString('vi-VN');
+  }
+
+  function escapeHTML(s) {
+    const d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  }
+
+  async function load() {
+    const statsEl = document.getElementById('stats');
+    const colsEl = document.getElementById('collections');
+    const colCountEl = document.getElementById('colCount');
+
+    try {
+      const resp = await fetch('/health');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+
+      const collections = data.collections || {};
+      const names = Object.keys(collections);
+      const totalPoints = names.reduce((sum, k) => sum + (collections[k]?.points || 0), 0);
+
+      statsEl.innerHTML = `
+        <div class="bg-surface-container-lowest p-5 rounded-xl ambient-shadow ghost-border flex flex-col justify-between h-32 relative overflow-hidden group">
+          <div class="absolute right-[-10px] top-[-10px] opacity-5 text-primary group-hover:scale-110 transition-transform duration-500">
+            <span class="material-symbols-outlined text-[100px]">database</span>
+          </div>
+          <div class="text-on-surface-variant text-sm font-medium">Collections</div>
+          <div class="font-headline font-extrabold text-4xl text-on-surface">${names.length}</div>
+        </div>
+        <div class="bg-surface-container-lowest p-5 rounded-xl ambient-shadow ghost-border flex flex-col justify-between h-32 relative overflow-hidden group">
+          <div class="absolute right-[-10px] top-[-10px] opacity-5 text-primary group-hover:scale-110 transition-transform duration-500">
+            <span class="material-symbols-outlined text-[100px]">data_object</span>
+          </div>
+          <div class="text-on-surface-variant text-sm font-medium">Tổng điểm dữ liệu</div>
+          <div class="font-headline font-extrabold text-4xl text-on-surface">${fmtNumber(totalPoints)}</div>
+        </div>
+        <div class="bg-surface-container-lowest p-5 rounded-xl ambient-shadow ghost-border flex flex-col justify-between h-32 relative overflow-hidden group">
+          <div class="absolute right-[-10px] top-[-10px] opacity-5 text-secondary-container group-hover:scale-110 transition-transform duration-500">
+            <span class="material-symbols-outlined text-[100px]">memory</span>
+          </div>
+          <div class="text-on-surface-variant text-sm font-medium">Embedding model</div>
+          <div class="font-headline font-bold text-lg text-on-surface mt-2 truncate" title="${escapeHTML(data.model || '')}">${escapeHTML(data.model || '—')}</div>
+        </div>
+        <div class="bg-surface-container-highest p-5 rounded-xl ambient-shadow flex flex-col justify-between h-32 relative overflow-hidden group">
+          <div class="absolute right-[-10px] top-[-10px] opacity-10 text-primary">
+            <span class="material-symbols-outlined text-[100px]">health_and_safety</span>
+          </div>
+          <div class="text-on-surface-variant text-sm font-medium">Trạng thái</div>
+          <div class="flex items-center gap-2 mt-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-[#10B981]"></span>
+            <span class="font-headline font-bold text-lg text-on-surface">Hoạt động</span>
+          </div>
+        </div>
+      `;
+
+      colCountEl.textContent = `${names.length} collection${names.length > 1 ? 's' : ''}`;
+
+      if (names.length === 0) {
+        colsEl.innerHTML = `
+          <div class="col-span-full bg-surface-container-lowest p-10 rounded-xl ghost-border text-center">
+            <div class="w-16 h-16 rounded-full bg-primary-fixed flex items-center justify-center mx-auto mb-4">
+              <span class="material-symbols-outlined text-primary text-3xl">inbox</span>
+            </div>
+            <p class="font-headline font-bold text-on-surface mb-1">Chưa có collection nào</p>
+            <p class="text-sm text-on-surface-variant mb-4">Hãy nạp dữ liệu đầu tiên để bắt đầu.</p>
+            <a class="inline-flex items-center gap-2 bg-gradient-to-br from-primary to-primary-container text-on-primary font-medium px-5 py-2 rounded-lg hover:shadow-[0_8px_20px_-4px_rgba(53,37,205,0.4)] transition-all" href="ingest.html">
+              <span class="material-symbols-outlined text-[18px]">upload_file</span>
+              <span>Nạp dữ liệu</span>
+            </a>
+          </div>`;
+        return;
+      }
+
+      colsEl.innerHTML = names.map(name => {
+        const m = metaFor(name);
+        const pts = collections[name]?.points || 0;
+        const isEmpty = pts === 0;
+        return `
+          <div class="bg-surface-container-lowest rounded-xl p-5 ambient-shadow ghost-border relative group hover:-translate-y-1 transition-transform">
+            <div class="flex items-start justify-between mb-4">
+              <div class="w-11 h-11 rounded-xl ${m.bg} flex items-center justify-center ${m.color}">
+                <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">${m.icon}</span>
+              </div>
+              <span class="${isEmpty ? 'bg-surface-variant text-on-surface-variant' : 'bg-primary-fixed text-on-primary-fixed-variant'} text-[11px] font-semibold px-2.5 py-1 rounded-full">
+                ${isEmpty ? 'Empty' : 'Active'}
+              </span>
+            </div>
+            <h3 class="font-headline font-bold text-lg text-on-surface leading-tight mb-1">${escapeHTML(m.label)}</h3>
+            <p class="text-xs font-mono text-on-surface-variant mb-4 truncate" title="${escapeHTML(name)}">${escapeHTML(name)}</p>
+            <div class="flex items-baseline gap-1.5">
+              <span class="font-headline font-extrabold text-2xl gradient-text">${fmtNumber(pts)}</span>
+              <span class="text-sm text-on-surface-variant">điểm dữ liệu</span>
+            </div>
+          </div>`;
+      }).join('');
+    } catch (err) {
+      statsEl.innerHTML = '';
+      colCountEl.textContent = '';
+      colsEl.innerHTML = `
+        <div class="col-span-full bg-surface-container-lowest p-10 rounded-xl ghost-border text-center">
+          <div class="w-16 h-16 rounded-full bg-error/10 flex items-center justify-center mx-auto mb-4">
+            <span class="material-symbols-outlined text-error text-3xl">error</span>
+          </div>
+          <p class="font-headline font-bold text-on-surface mb-1">Không kết nối được server</p>
+          <p class="text-sm text-on-surface-variant font-mono">${escapeHTML(err.message)}</p>
+        </div>`;
+    }
+  }
+
+  load();
+</script>
+</body>
+</html>

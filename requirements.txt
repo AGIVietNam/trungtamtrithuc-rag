@@ -1,0 +1,25 @@
+anthropic>=0.40.0
+groq
+fastapi
+uvicorn[standard]
+pydantic>=2
+python-dotenv
+python-multipart
+httpx
+requests
+qdrant-client>=1.11.0
+voyageai
+pdfplumber
+pdf2image
+docling[mlx]
+openpyxl
+pandas
+markdown
+yt-dlp
+youtube-transcript-api
+# openai-whisper  # optional — heavy dependency, uncomment if needed
+tiktoken
+numpy
+sentence-transformers
+pytest-asyncio
+qui

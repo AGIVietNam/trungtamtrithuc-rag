@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html class="light" lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta content="width=device-width, initial-scale=1.0" name="viewport" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<title>Trung Tâm Tri Thức — Enterprise RAG</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+<script>
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "inverse-primary": "#c3c0ff",
+          "on-surface-variant": "#464555",
+          "surface-container-low": "#f2f3ff",
+          "surface-container-high": "#e2e7ff",
+          "surface-container-lowest": "#ffffff",
+          "surface-bright": "#faf8ff",
+          "background": "#faf8ff",
+          "error": "#ba1a1a",
+          "outline": "#777587",
+          "secondary-container": "#fea619",
+          "on-secondary-container": "#684000",
+          "primary-container": "#4f46e5",
+          "primary-fixed": "#e2dfff",
+          "primary": "#3525cd",
+          "surface-container": "#eaedff",
+          "primary-fixed-dim": "#c3c0ff",
+          "outline-variant": "#c7c4d8",
+          "surface-container-highest": "#dae2fd",
+          "surface-variant": "#dae2fd",
+          "on-surface": "#131b2e",
+          "on-background": "#131b2e",
+          "on-primary": "#ffffff",
+          "surface": "#faf8ff",
+          "secondary-fixed": "#ffddb8",
+          "on-secondary-fixed": "#2a1700",
+        },
+        borderRadius: { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" },
+        fontFamily: {
+          "headline": ["Manrope", "sans-serif"],
+          "body": ["Inter", "sans-serif"],
+          "mono": ["JetBrains Mono", "monospace"],
+        },
+      },
+    },
+  };
+</script>
+<style>
+  .glass-panel { background-color: rgba(242, 243, 255, 0.7); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+  .gradient-text { background: linear-gradient(135deg, #3525cd, #4f46e5); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .ambient-shadow { box-shadow: 0px 12px 32px -4px rgba(15,23,42,0.08); }
+  .ghost-border { border: 1px solid rgba(199,196,216,0.15); }
+</style>
+</head>
+<body class="bg-surface text-on-surface font-body antialiased min-h-screen flex flex-col relative overflow-x-hidden">
+<!-- Ambient background -->
+<div class="fixed inset-0 pointer-events-none z-[-1] overflow-hidden">
+  <div class="absolute top-[-10%] right-[-5%] w-[600px] h-[600px] rounded-full bg-primary-fixed-dim/30 blur-[120px] mix-blend-multiply"></div>
+  <div class="absolute bottom-[-10%] left-[-10%] w-[500px] h-[500px] rounded-full bg-surface-container-highest/60 blur-[100px] mix-blend-multiply"></div>
+</div>
+
+<!-- Top nav -->
+<header class="flex justify-between items-center w-full px-6 py-3 bg-surface-container-low sticky top-0 z-50">
+  <a class="flex items-center gap-2 text-xl font-headline font-bold text-on-surface tracking-tight" href="index.html">
+    <span class="material-symbols-outlined text-primary" style="font-variation-settings: 'FILL' 1;">book</span>
+    <span>Trung Tâm Tri Thức</span>
+  </a>
+  <nav class="hidden md:flex items-center gap-8">
+    <a class="text-primary font-bold border-b-2 border-primary pb-1" href="index.html">Trang chủ</a>
+    <a class="text-on-surface-variant hover:text-on-surface transition-colors pb-1" href="chat.html">Chat</a>
+    <a class="text-on-surface-variant hover:text-on-surface transition-colors pb-1" href="ingest.html">Nạp dữ liệu</a>
+    <a class="text-on-surface-variant hover:text-on-surface transition-colors pb-1" href="knowledge.html">Kho tri thức</a>
+  </nav>
+  <a class="inline-flex items-center gap-2 bg-gradient-to-br from-primary to-primary-container text-on-primary font-medium px-4 py-2 rounded-lg hover:shadow-[0_8px_20px_-4px_rgba(53,37,205,0.4)] transition-all text-sm" href="ingest.html">
+    <span class="material-symbols-outlined text-[18px]">upload</span>
+    <span class="hidden sm:inline">Tải tài liệu</span>
+  </a>
+</header>
+
+<!-- Main -->
+<main class="flex-1 w-full max-w-[1440px] mx-auto flex flex-col gap-24 py-16 px-6 lg:px-16">
+
+  <!-- Hero -->
+  <section class="flex flex-col lg:flex-row items-center gap-16 w-full relative">
+    <div class="flex-1 flex flex-col gap-8 z-10 max-w-2xl">
+      <div class="inline-flex items-center gap-2 bg-surface-container-low text-primary px-3 py-1 rounded-full text-sm font-medium w-fit ghost-border">
+        <span class="material-symbols-outlined text-[18px]">auto_awesome</span>
+        <span>Enterprise RAG Platform</span>
+      </div>
+      <h1 class="font-headline text-5xl lg:text-[4rem] leading-[1.1] font-extrabold text-on-surface tracking-tight">
+        Hỏi đáp thông minh từ <br />
+        <span class="gradient-text">kho tri thức</span> của bạn
+      </h1>
+      <p class="font-body text-lg text-on-surface-variant leading-[1.6] max-w-xl">
+        Nạp tài liệu, video và YouTube — hệ thống tự động phân tích, lập chỉ mục và trả lời câu hỏi kèm nguồn trích dẫn chính xác đến từng trang, từng giây.
+      </p>
+      <div class="flex flex-wrap items-center gap-4 pt-4">
+        <a class="bg-gradient-to-br from-primary to-primary-container text-on-primary font-medium px-6 py-3 rounded-lg hover:shadow-[0_8px_20px_-4px_rgba(53,37,205,0.4)] transition-all duration-300 flex items-center gap-2" href="chat.html">
+          <span>Bắt đầu trò chuyện</span>
+          <span class="material-symbols-outlined">arrow_forward</span>
+        </a>
+        <a class="bg-surface-container-low text-on-surface font-medium px-6 py-3 rounded-lg hover:bg-surface-container-highest transition-colors flex items-center gap-2" href="ingest.html">
+          <span class="material-symbols-outlined">upload_file</span>
+          <span>Nạp dữ liệu</span>
+        </a>
+      </div>
+      <div class="flex items-center gap-10 mt-6 bg-surface-container-low rounded-2xl px-6 py-5">
+        <div class="flex flex-col">
+          <span class="font-headline font-bold text-2xl text-on-surface">Đa định dạng</span>
+          <span class="text-sm text-on-surface-variant">PDF, DOCX, Video, YouTube</span>
+        </div>
+        <div class="flex flex-col">
+          <span class="font-headline font-bold text-2xl text-on-surface">AI metadata</span>
+          <span class="text-sm text-on-surface-variant">Tự động phân loại, gắn thẻ</span>
+        </div>
+        <div class="flex flex-col">
+          <span class="font-headline font-bold text-2xl text-on-surface">&lt; 2s</span>
+          <span class="text-sm text-on-surface-variant">Thời gian phản hồi</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hero visual -->
+    <div class="flex-1 w-full relative flex justify-center items-center lg:h-[520px] h-[360px]">
+      <div class="absolute inset-0 bg-gradient-to-tr from-surface-container-high/60 to-surface/0 rounded-3xl"></div>
+      <div class="relative w-full h-full rounded-3xl ambient-shadow bg-surface-container-lowest overflow-hidden flex flex-col">
+        <div class="px-5 py-3 bg-surface-container-low flex items-center gap-2">
+          <span class="material-symbols-outlined text-primary">smart_toy</span>
+          <span class="font-headline font-semibold text-sm">Trợ lý Tri Thức</span>
+        </div>
+        <div class="flex-1 p-5 flex flex-col gap-4 overflow-hidden">
+          <div class="self-end bg-surface-container-high rounded-2xl rounded-tr-sm px-4 py-2 text-sm max-w-[80%]">
+            Quy định độ cao thông thủy tầng hầm đỗ xe là bao nhiêu?
+          </div>
+          <div class="self-start flex gap-3 max-w-[90%]">
+            <div class="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-primary text-[18px]">smart_toy</span>
+            </div>
+            <div class="text-sm text-on-surface leading-[1.6]">
+              Theo <strong>QCVN 13:2018/BXD</strong>, chiều cao thông thủy tối thiểu của tầng hầm đỗ xe ô tô không được nhỏ hơn
+              <strong>2.2 m</strong>
+              <span class="inline-flex items-center justify-center bg-secondary-container/30 text-on-secondary-container font-mono text-[10px] px-1.5 py-0.5 rounded mx-1">[1]</span>.
+            </div>
+          </div>
+          <div class="self-start ml-11 bg-surface-container-low rounded-lg p-3 border-l-2 border-secondary-container">
+            <div class="flex items-center gap-2 text-xs font-mono text-on-surface-variant">
+              <span class="material-symbols-outlined text-[14px]">description</span>
+              QCVN_13_2018_BXD.pdf · Trang 12
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- Floating glass card -->
+      <div class="absolute bottom-[-20px] left-[-40px] glass-panel p-5 rounded-2xl shadow-[0_20px_40px_-8px_rgba(15,23,42,0.12)] ghost-border max-w-[280px] hidden md:block">
+        <div class="flex items-center gap-3 mb-2">
+          <div class="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+            <span class="material-symbols-outlined text-[18px]">search_insights</span>
+          </div>
+          <span class="font-headline font-bold text-sm text-on-surface">Truy xuất ngữ nghĩa</span>
+        </div>
+        <p class="text-xs text-on-surface-variant leading-relaxed">
+          Vector hóa tài liệu tự động, tìm kiếm theo ý nghĩa thay vì từ khóa.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Feature bento -->
+  <section class="flex flex-col gap-12 w-full pt-8">
+    <div class="flex flex-col gap-4 text-center items-center max-w-3xl mx-auto">
+      <h2 class="font-headline text-3xl md:text-4xl font-extrabold text-on-surface tracking-tight">Năng lực lõi</h2>
+      <p class="text-lg text-on-surface-variant leading-[1.6]">Được thiết kế cho môi trường doanh nghiệp, đảm bảo độ chính xác và minh bạch.</p>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 auto-rows-[280px]">
+      <!-- Large card -->
+      <div class="col-span-1 md:col-span-2 bg-surface-container-lowest rounded-2xl p-8 flex flex-col justify-between ambient-shadow ghost-border hover:-translate-y-1 transition-transform duration-300">
+        <div class="flex items-start justify-between">
+          <div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center text-primary">
+            <span class="material-symbols-outlined">format_quote</span>
+          </div>
+          <span class="bg-secondary-container/20 text-on-secondary-container px-3 py-1 rounded-full text-xs font-mono font-medium">Core</span>
+        </div>
+        <div>
+          <h3 class="font-headline font-bold text-xl text-on-surface mb-3">Trả lời kèm trích dẫn</h3>
+          <p class="text-on-surface-variant leading-[1.6]">Mọi câu trả lời đính kèm nguồn chi tiết (trang, timestamp, tên file), loại bỏ hallucination và cho phép kiểm chứng tức thì.</p>
+        </div>
+      </div>
+      <!-- Multi-format -->
+      <div class="bg-surface-container-lowest rounded-2xl p-8 flex flex-col justify-between ambient-shadow ghost-border hover:-translate-y-1 transition-transform duration-300">
+        <div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center text-primary">
+          <span class="material-symbols-outlined">file_present</span>
+        </div>
+        <div>
+          <h3 class="font-headline font-bold text-xl text-on-surface mb-3">Nạp đa định dạng</h3>
+          <div class="flex flex-wrap gap-2 mb-2">
+            <span class="bg-surface-container text-on-surface-variant px-2 py-1 rounded-full text-xs font-medium">PDF</span>
+            <span class="bg-surface-container text-on-surface-variant px-2 py-1 rounded-full text-xs font-medium">DOCX</span>
+            <span class="bg-surface-container text-on-surface-variant px-2 py-1 rounded-full text-xs font-medium">Video</span>
+            <span class="bg-surface-container text-on-surface-variant px-2 py-1 rounded-full text-xs font-medium">YouTube</span>
+          </div>
+          <p class="text-sm text-on-surface-variant">OCR, phiên âm Whisper và phân tích cấu trúc tài liệu.</p>
+        </div>
+      </div>
+      <!-- AI metadata -->
+      <div class="bg-surface-container-highest rounded-2xl p-8 flex flex-col justify-between border-none relative overflow-hidden group">
+        <div class="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent"></div>
+        <div class="w-12 h-12 rounded-xl bg-surface-container-lowest flex items-center justify-center text-primary relative z-10">
+          <span class="material-symbols-outlined">auto_awesome</span>
+        </div>
+        <div class="relative z-10">
+          <h3 class="font-headline font-bold text-xl text-on-surface mb-3">AI metadata tự động</h3>
+          <p class="text-sm text-on-surface-variant leading-relaxed">Gen tiêu đề, mô tả, thẻ và lĩnh vực ngay tại thời điểm nạp — không phải điền thủ công.</p>
+        </div>
+      </div>
+      <!-- 2-col sub -->
+      <div class="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div class="bg-surface-container-lowest rounded-2xl p-6 flex flex-col ambient-shadow ghost-border">
+          <div class="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center text-primary mb-4">
+            <span class="material-symbols-outlined text-[20px]">history</span>
+          </div>
+          <h3 class="font-headline font-bold text-lg text-on-surface mb-2">Ghi nhớ ngữ cảnh</h3>
+          <p class="text-sm text-on-surface-variant">Duy trì mạch hội thoại qua nhiều lượt, hỗ trợ nhiều phiên song song.</p>
+        </div>
+        <div class="bg-surface-container-lowest rounded-2xl p-6 flex flex-col ambient-shadow ghost-border">
+          <div class="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center text-primary mb-4">
+            <span class="material-symbols-outlined text-[20px]">language</span>
+          </div>
+          <h3 class="font-headline font-bold text-lg text-on-surface mb-2">Tiếng Việt bản địa</h3>
+          <p class="text-sm text-on-surface-variant">Tối ưu embeddings cho tiếng Việt, hiểu thuật ngữ chuyên ngành.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- How it works -->
+  <section class="py-8 w-full">
+    <h2 class="font-headline text-3xl font-extrabold text-on-surface mb-12 text-center">Quy trình xử lý tri thức</h2>
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-8 relative">
+      <div class="hidden md:block absolute top-[40px] left-[10%] right-[10%] h-[2px] bg-surface-container-high z-0"></div>
+      <div class="flex flex-col items-center text-center relative z-10">
+        <div class="w-20 h-20 rounded-full bg-surface-container-lowest border-4 border-surface ambient-shadow flex items-center justify-center text-xl font-headline font-bold text-primary mb-4">01</div>
+        <h4 class="font-bold text-lg text-on-surface mb-2">Nạp tài liệu</h4>
+        <p class="text-sm text-on-surface-variant">Upload file hoặc dán URL YouTube.</p>
+      </div>
+      <div class="flex flex-col items-center text-center relative z-10">
+        <div class="w-20 h-20 rounded-full bg-surface-container-lowest border-4 border-surface ambient-shadow flex items-center justify-center text-xl font-headline font-bold text-primary mb-4">02</div>
+        <h4 class="font-bold text-lg text-on-surface mb-2">Phân tích &amp; Vector hóa</h4>
+        <p class="text-sm text-on-surface-variant">Chunking + embedding vào Qdrant.</p>
+      </div>
+      <div class="flex flex-col items-center text-center relative z-10">
+        <div class="w-20 h-20 rounded-full bg-surface-container-lowest border-4 border-surface ambient-shadow flex items-center justify-center text-xl font-headline font-bold text-primary mb-4">03</div>
+        <h4 class="font-bold text-lg text-on-surface mb-2">Truy vấn RAG</h4>
+        <p class="text-sm text-on-surface-variant">Tìm kiếm ngữ nghĩa các đoạn liên quan.</p>
+      </div>
+      <div class="flex flex-col items-center text-center relative z-10">
+        <div class="w-20 h-20 rounded-full bg-gradient-to-br from-primary to-primary-container text-on-primary border-4 border-surface shadow-md flex items-center justify-center text-xl font-headline font-bold mb-4">04</div>
+        <h4 class="font-bold text-lg text-on-surface mb-2">Tổng hợp &amp; Trích dẫn</h4>
+        <p class="text-sm text-on-surface-variant">LLM trả lời kèm nguồn tham chiếu.</p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="w-full bg-surface-container-low py-8 px-6 lg:px-16 mt-auto">
+  <div class="max-w-[1440px] mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+    <div class="flex items-center gap-2 text-lg font-bold text-on-surface">
+      <span class="material-symbols-outlined text-primary" style="font-variation-settings: 'FILL' 1;">book</span>
+      <span>Trung Tâm Tri Thức</span>
+    </div>
+    <div class="flex items-center gap-6 text-sm text-on-surface-variant">
+      <a class="hover:text-primary transition-colors" href="chat.html">Chat</a>
+      <a class="hover:text-primary transition-colors" href="ingest.html">Nạp dữ liệu</a>
+      <a class="hover:text-primary transition-colors" href="knowledge.html">Kho tri thức</a>
+    </div>
+    <div class="text-xs text-on-surface-variant/70 font-mono">© 2026 Trung Tâm Tri Thức</div>
+  </div>
+</footer>
+</body>
+</html>

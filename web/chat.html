@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html class="light" lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta content="width=device-width, initial-scale=1.0" name="viewport" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<title>Chat — Trung Tâm Tri Thức</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+<script>
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "on-surface-variant": "#464555",
+          "surface-container-low": "#f2f3ff",
+          "surface-container-high": "#e2e7ff",
+          "surface-container-lowest": "#ffffff",
+          "surface-bright": "#faf8ff",
+          "background": "#faf8ff",
+          "error": "#ba1a1a",
+          "outline": "#777587",
+          "secondary-container": "#fea619",
+          "on-secondary-container": "#684000",
+          "primary-container": "#4f46e5",
+          "primary-fixed": "#e2dfff",
+          "primary": "#3525cd",
+          "surface-container": "#eaedff",
+          "outline-variant": "#c7c4d8",
+          "surface-container-highest": "#dae2fd",
+          "surface-variant": "#dae2fd",
+          "on-surface": "#131b2e",
+          "on-primary": "#ffffff",
+          "surface": "#faf8ff",
+          "secondary-fixed": "#ffddb8",
+          "on-secondary-fixed": "#2a1700",
+          "on-primary-fixed-variant": "#3323cc",
+        },
+        borderRadius: { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" },
+        fontFamily: {
+          "headline": ["Manrope", "sans-serif"],
+          "body": ["Inter", "sans-serif"],
+          "mono": ["JetBrains Mono", "monospace"],
+        },
+      },
+    },
+  };
+</script>
+<style>
+  html, body { height: 100%; }
+  body { overflow: hidden; }
+  .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+  .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+  .custom-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(199,196,216,0.4); border-radius: 10px; }
+  .custom-scrollbar:hover::-webkit-scrollbar-thumb { background-color: rgba(119,117,135,0.5); }
+  .ghost-border { border: 1px solid rgba(199,196,216,0.15); }
+  .ambient-shadow { box-shadow: 0px 12px 32px -4px rgba(15,23,42,0.08); }
+
+  /* Conf badges */
+  .conf-tag { margin-left: auto; font-size: 0.68rem; font-weight: 700; padding: 0.1rem 0.45rem; border-radius: 99px; flex-shrink: 0; font-family: 'JetBrains Mono', monospace; }
+  .conf-high { background: #dcfce7; color: #15803d; }
+  .conf-mid  { background: #fef3c7; color: #854d0e; }
+  .conf-low  { background: #fee2e2; color: #b91c1c; }
+  .pos-tag {
+    font-size: 0.68rem; padding: 0.15rem 0.5rem; border-radius: 4px;
+    background: #e2dfff; color: #3323cc; text-decoration: none; white-space: nowrap;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  a.pos-tag:hover { background: #c3c0ff; }
+
+  /* Typing animation */
+  .typing span { display: inline-block; width: 6px; height: 6px; background: #777587; border-radius: 50%; margin: 0 1px; animation: blink 1.2s infinite both; }
+  .typing span:nth-child(2) { animation-delay: 0.2s; }
+  .typing span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%,80%,100%{opacity:0.2} 40%{opacity:1} }
+</style>
+</head>
+<body class="bg-surface text-on-surface font-body h-screen flex flex-col overflow-hidden">
+
+<!-- UNIFIED TOP NAVBAR (shared with all pages) -->
+<header class="flex justify-between items-center w-full px-6 py-3 bg-surface-container-low flex-shrink-0 z-50">
+  <a class="flex items-center gap-2 text-xl font-headline font-bold text-on-surface tracking-tight" href="index.html">
+    <span class="material-symbols-outlined text-primary" style="font-variation-settings: 'FILL' 1;">book</span>
+    <span>Trung Tâm Tri Thức</span>
+  </a>
+  <nav class="hidden md:flex items-center gap-8">
+    <a class="text-on-surface-variant hover:text-on-surface transition-colors pb-1" href="index.html">Trang chủ</a>
+    <a class="text-primary font-bold border-b-2 border-primary pb-1" href="chat.html">Chat</a>
+    <a class="text-on-surface-variant hover:text-on-surface transition-colors pb-1" href="ingest.html">Nạp dữ liệu</a>
+    <a class="text-on-surface-variant hover:text-on-surface transition-colors pb-1" href="knowledge.html">Kho tri thức</a>
+  </nav>
+  <a class="inline-flex items-center gap-2 bg-gradient-to-br from-primary to-primary-container text-on-primary font-medium px-4 py-2 rounded-lg hover:shadow-[0_8px_20px_-4px_rgba(53,37,205,0.4)] transition-all text-sm" href="ingest.html">
+    <span class="material-symbols-outlined text-[18px]">upload</span>
+    <span class="hidden sm:inline">Tải tài liệu</span>
+  </a>
+</header>
+
+<div class="flex flex-1 overflow-hidden">
+<!-- LEFT SIDEBAR -->
+<aside class="w-72 bg-surface-container-highest h-full flex flex-col flex-shrink-0">
+  <!-- New chat -->
+  <div class="px-4 pt-5 pb-4">
+    <button class="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg bg-gradient-to-br from-primary to-primary-container text-on-primary font-medium hover:shadow-[0_8px_20px_-4px_rgba(53,37,205,0.4)] transition-all" id="newChatBtn">
+      <span class="material-symbols-outlined text-lg">add</span>
+      <span class="text-sm">Cuộc hội thoại mới</span>
+    </button>
+  </div>
+
+  <!-- Filters -->
+  <div class="px-4 pb-3 flex flex-col gap-3">
+    <div>
+      <label class="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider mb-1.5 block">User đang test</label>
+      <select class="w-full bg-surface-container-lowest rounded-lg text-sm px-3 py-2 border-none focus:ring-0 focus:border-b-2 focus:border-primary outline-none" id="userSelect">
+        <option value="test-user-1">User 1 (test-user-1)</option>
+        <option value="test-user-2">User 2 (test-user-2)</option>
+      </select>
+    </div>
+    <div>
+      <label class="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider mb-1.5 block">Lĩnh vực chuyên gia</label>
+      <select class="w-full bg-surface-container-lowest rounded-lg text-sm px-3 py-2 border-none focus:ring-0 focus:border-b-2 focus:border-primary outline-none" id="domainSelect">
+        <option value="mặc định">Tất cả lĩnh vực</option>
+        <option value="marketing">Marketing</option>
+        <option value="mep">MEP (Cơ điện)</option>
+        <option value="bim">BIM</option>
+        <option value="pháp lý">Pháp lý</option>
+        <option value="sản xuất">Sản xuất</option>
+        <option value="công nghệ thông tin">Công nghệ thông tin</option>
+        <option value="nhân sự">Nhân sự</option>
+        <option value="tài chính">Tài chính</option>
+        <option value="kinh doanh">Kinh doanh</option>
+        <option value="thiết kế">Thiết kế</option>
+        <option value="kết cấu">Kết cấu</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- History -->
+  <div class="flex-1 overflow-y-auto px-4 pb-4 custom-scrollbar">
+    <div class="flex items-center justify-between mb-2 px-2">
+      <h2 class="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider">Lịch sử</h2>
+      <button class="text-[10px] font-semibold text-on-surface-variant hover:text-error hover:bg-error/10 px-1.5 py-0.5 rounded transition-colors uppercase tracking-wide" id="clearAllBtn" title="Xoá toàn bộ hội thoại">Xoá hết</button>
+    </div>
+    <div class="flex flex-col gap-1" id="sessionList"></div>
+  </div>
+
+  <!-- Footer tip -->
+  <div class="px-4 pb-4">
+    <div class="bg-surface-container-lowest/60 rounded-lg px-3 py-2.5 flex items-center gap-2">
+      <span class="material-symbols-outlined text-primary text-[18px]">lightbulb</span>
+      <p class="text-xs text-on-surface-variant leading-snug">Đổi lĩnh vực ở trên để giới hạn nguồn trả lời.</p>
+    </div>
+  </div>
+</aside>
+
+<!-- MAIN CHAT -->
+<main class="flex-1 flex flex-col min-w-0 bg-surface relative">
+  <!-- Top bar -->
+  <header class="h-14 flex items-center justify-between px-6 bg-surface-container-low/60 backdrop-blur-md sticky top-0 z-10">
+    <div class="flex items-center gap-2 text-sm text-on-surface-variant min-w-0">
+      <span class="material-symbols-outlined text-[18px]">forum</span>
+      <span class="font-semibold text-on-surface truncate" id="currentTitle">Cuộc trò chuyện</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-surface-container-lowest text-xs font-mono font-medium text-primary ghost-border">
+        <span class="w-2 h-2 rounded-full bg-[#10B981]"></span>
+        Sẵn sàng
+      </div>
+    </div>
+  </header>
+
+  <!-- Messages -->
+  <div class="flex-1 overflow-y-auto px-6 lg:px-8 py-6 custom-scrollbar scroll-smooth" id="messages">
+    <div class="max-w-4xl mx-auto flex flex-col gap-6" id="messagesInner">
+      <div class="empty-state flex flex-col items-center justify-center gap-3 py-16 text-on-surface-variant">
+        <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary to-primary-container flex items-center justify-center text-on-primary">
+          <span class="material-symbols-outlined text-3xl">auto_awesome</span>
+        </div>
+        <p class="font-headline text-lg font-semibold text-on-surface">Đặt câu hỏi để bắt đầu</p>
+        <p class="text-sm">Hỏi về tài liệu, tiêu chuẩn, video đã nạp…</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div class="px-6 pb-6 pt-3 bg-surface">
+    <div class="max-w-4xl mx-auto">
+      <div class="relative bg-surface-container-low rounded-2xl p-2 focus-within:ring-2 focus-within:ring-primary/20 transition-all">
+        <textarea id="inputBox" rows="2" placeholder="Đặt câu hỏi của bạn…"
+          class="w-full bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-on-surface placeholder:text-outline text-base max-h-48"></textarea>
+        <div class="flex items-center justify-between px-2 pb-1 pt-2 border-t border-outline-variant/20">
+          <span class="text-xs font-mono text-outline">Enter để gửi · Shift+Enter xuống dòng</span>
+          <button id="sendBtn" class="bg-gradient-to-br from-primary to-primary-container text-on-primary p-2.5 rounded-xl hover:shadow-[0_4px_14px_-2px_rgba(53,37,205,0.4)] transition-all flex items-center justify-center disabled:opacity-40">
+            <span class="material-symbols-outlined">send</span>
+          </button>
+        </div>
+      </div>
+      <p class="text-center text-xs text-on-surface-variant mt-2">AI có thể cung cấp thông tin không chính xác. Vui lòng đối chiếu nguồn.</p>
+    </div>
+  </div>
+</main>
+</div>
+
+<script type="module">
+  const API_BASE = '';
+
+  const userSelect = document.getElementById('userSelect');
+  let currentUserId = localStorage.getItem('ttt_user_id') || 'test-user-1';
+  userSelect.value = currentUserId;
+
+  const sessionKey = uid => `ttt_sessions_${uid}`;
+  const currentSessionKey = uid => `ttt_session_id_${uid}`;
+
+  let sessions = JSON.parse(localStorage.getItem(sessionKey(currentUserId)) || '[]');
+  let currentSessionId = localStorage.getItem(currentSessionKey(currentUserId)) || crypto.randomUUID();
+  localStorage.setItem(currentSessionKey(currentUserId), currentSessionId);
+
+  const messagesInner = document.getElementById('messagesInner');
+  const messagesScroll = document.getElementById('messages');
+  const inputBox = document.getElementById('inputBox');
+  const sendBtn = document.getElementById('sendBtn');
+  const titleEl = document.getElementById('currentTitle');
+
+  function updateTitle() {
+    const s = sessions.find(x => x.id === currentSessionId);
+    titleEl.textContent = (s && s.title) ? s.title : 'Cuộc trò chuyện';
+  }
+
+  function renderSessionList() {
+    const list = document.getElementById('sessionList');
+    list.innerHTML = '';
+    [...sessions].reverse().forEach(s => {
+      const active = s.id === currentSessionId;
+      const el = document.createElement('div');
+      el.className = `group flex items-start gap-2 pl-3 pr-2 py-2 rounded-lg cursor-pointer transition-all relative ${
+        active ? 'bg-surface-container-lowest text-primary shadow-[0_4px_12px_-4px_rgba(15,23,42,0.05)]' : 'text-on-surface-variant hover:bg-surface-container-low'
+      }`;
+      el.title = s.title || '';
+      el.addEventListener('click', () => loadSession(s.id));
+
+      const icon = document.createElement('span');
+      icon.className = `material-symbols-outlined text-[16px] mt-0.5 ${active ? 'text-primary' : 'text-on-surface-variant/60'}`;
+      icon.textContent = 'chat_bubble_outline';
+      el.appendChild(icon);
+
+      const info = document.createElement('div');
+      info.className = 'flex-1 min-w-0';
+      const label = document.createElement('p');
+      label.className = `text-sm ${active ? 'font-semibold' : 'font-medium'} truncate`;
+      label.textContent = s.title || 'Cuộc hội thoại';
+      info.appendChild(label);
+      el.appendChild(info);
+
+      const del = document.createElement('button');
+      del.className = 'opacity-0 group-hover:opacity-100 text-on-surface-variant/60 hover:text-error hover:bg-error/10 w-6 h-6 rounded flex items-center justify-center transition-all flex-shrink-0';
+      del.type = 'button';
+      del.title = 'Xoá hội thoại này';
+      del.innerHTML = '<span class="material-symbols-outlined text-[14px]">close</span>';
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteSession(s.id, s.title);
+      });
+      el.appendChild(del);
+
+      list.appendChild(el);
+    });
+    updateTitle();
+  }
+
+  async function deleteSession(sessionId, title) {
+    const label = title ? `"${title.slice(0, 40)}"` : 'hội thoại này';
+    if (!confirm(`Xoá ${label}? Thao tác này không thể hoàn tác.`)) return;
+
+    sessions = sessions.filter(s => s.id !== sessionId);
+    localStorage.setItem(sessionKey(currentUserId), JSON.stringify(sessions));
+
+    if (sessionId === currentSessionId) {
+      currentSessionId = crypto.randomUUID();
+      localStorage.setItem(currentSessionKey(currentUserId), currentSessionId);
+      showEmpty();
+    }
+    renderSessionList();
+
+    try {
+      await fetch(`${API_BASE}/api/chat/memory/session/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+    } catch (err) { console.warn('Backend delete session failed:', err); }
+  }
+
+  async function deleteAllSessions() {
+    if (!sessions.length) { alert('Chưa có hội thoại nào để xoá.'); return; }
+    if (!confirm(`Xoá toàn bộ ${sessions.length} hội thoại của user ${currentUserId}? Không thể hoàn tác.`)) return;
+
+    const ids = sessions.map(s => s.id);
+    sessions = [];
+    localStorage.setItem(sessionKey(currentUserId), '[]');
+    currentSessionId = crypto.randomUUID();
+    localStorage.setItem(currentSessionKey(currentUserId), currentSessionId);
+    showEmpty();
+    renderSessionList();
+
+    try {
+      await fetch(`${API_BASE}/api/chat/memory/user/${encodeURIComponent(currentUserId)}`, { method: 'DELETE' });
+      await Promise.all(ids.map(id =>
+        fetch(`${API_BASE}/api/chat/memory/session/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {})
+      ));
+    } catch (err) { console.warn('Backend clear-all failed:', err); }
+  }
+
+  function loadSession(id) {
+    currentSessionId = id;
+    localStorage.setItem(currentSessionKey(currentUserId), currentSessionId);
+    const s = sessions.find(x => x.id === id);
+    messagesInner.innerHTML = '';
+    if (!s || !s.messages || !s.messages.length) {
+      showEmpty();
+    } else {
+      s.messages.forEach(m => addBubble(m.role, m.content, m.sources, false, m.suggestions));
+    }
+    renderSessionList();
+  }
+
+  function showEmpty() {
+    messagesInner.innerHTML = `
+      <div class="empty-state flex flex-col items-center justify-center gap-3 py-16 text-on-surface-variant">
+        <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary to-primary-container flex items-center justify-center text-on-primary">
+          <span class="material-symbols-outlined text-3xl">auto_awesome</span>
+        </div>
+        <p class="font-headline text-lg font-semibold text-on-surface">Đặt câu hỏi để bắt đầu</p>
+        <p class="text-sm">Hỏi về tài liệu, tiêu chuẩn, video đã nạp…</p>
+      </div>`;
+  }
+
+  function clearEmpty() {
+    const e = messagesInner.querySelector('.empty-state');
+    if (e) e.remove();
+  }
+
+  function ensureSession() {
+    if (!sessions.find(s => s.id === currentSessionId)) {
+      sessions.push({ id: currentSessionId, title: '', messages: [] });
+    }
+  }
+
+  function saveMessage(role, content, sources, suggestions) {
+    ensureSession();
+    const s = sessions.find(x => x.id === currentSessionId);
+    s.messages = s.messages || [];
+    s.messages.push({ role, content, sources, suggestions });
+    if (!s.title && role === 'user') s.title = content.slice(0, 48);
+    localStorage.setItem(sessionKey(currentUserId), JSON.stringify(sessions));
+    renderSessionList();
+  }
+
+  function confInfo(score) {
+    if (score == null) return null;
+    if (score >= 0.75) return { cls: 'conf-high', label: 'Cao' };
+    if (score >= 0.4)  return { cls: 'conf-mid',  label: 'TB' };
+    return { cls: 'conf-low', label: 'Thấp' };
+  }
+
+  function safeHref(url) {
+    if (!url || typeof url !== 'string') return null;
+    const trimmed = url.trim();
+    if (!/^(https?:|mailto:)/i.test(trimmed)) return null;
+    return escapeHTML(trimmed);
+  }
+
+  function buildSourcesHTML(sources) {
+    if (!sources || !sources.length) return '';
+    const items = sources.map(src => {
+      const title = escapeHTML(src.title || src.source || 'Nguồn');
+      const baseHref = safeHref(src.url || src.youtube_url);
+      const score = src.score ?? src.confidence;
+      const conf = confInfo(score);
+      const badge = conf ? `<span class="conf-tag ${conf.cls}">${conf.label}</span>` : '';
+
+      let posHTML = '';
+      const positions = src.positions || [];
+      if (positions.length > 0) {
+        const tags = positions.map(p => {
+          if (p.timestamp) {
+            const ts = escapeHTML(p.timestamp);
+            const href = safeHref(p.url) || baseHref;
+            return href
+              ? `<a href="${href}" target="_blank" rel="noopener" class="pos-tag">&#9654; ${ts}</a>`
+              : `<span class="pos-tag">&#9654; ${ts}</span>`;
+          }
+          if (p.page != null) return `<span class="pos-tag">&#128196; Trang ${escapeHTML(String(p.page))}</span>`;
+          return '';
+        }).filter(Boolean).join('');
+        if (tags) posHTML = `<div class="flex flex-wrap gap-1 mt-1">${tags}</div>`;
+      } else if (src.timestamp) {
+        const ts = escapeHTML(src.timestamp);
+        const tag = baseHref
+          ? `<a href="${baseHref}" target="_blank" rel="noopener" class="pos-tag">&#9654; ${ts}</a>`
+          : `<span class="pos-tag">&#9654; ${ts}</span>`;
+        posHTML = `<div class="flex flex-wrap gap-1 mt-1">${tag}</div>`;
+      } else if (src.page != null) {
+        posHTML = `<div class="flex flex-wrap gap-1 mt-1"><span class="pos-tag">&#128196; Trang ${escapeHTML(String(src.page))}</span></div>`;
+      }
+
+      const titleHTML = baseHref
+        ? `<a class="text-primary font-semibold hover:underline" href="${baseHref}" target="_blank" rel="noopener">${title}</a>`
+        : `<span class="text-on-surface font-semibold">${title}</span>`;
+
+      return `
+        <div class="flex items-start gap-3 p-3 rounded-lg bg-surface-container-low ghost-border hover:shadow-[0_4px_12px_-4px_rgba(15,23,42,0.08)] transition-all">
+          <span class="material-symbols-outlined text-on-surface-variant text-[18px] mt-0.5">description</span>
+          <div class="flex-1 min-w-0 flex flex-col gap-0.5">
+            <div class="text-sm truncate">${titleHTML}</div>
+            ${posHTML}
+          </div>
+          ${badge}
+        </div>`;
+    }).join('');
+    return `
+      <div class="mt-4">
+        <p class="text-xs font-mono font-medium text-on-surface-variant uppercase tracking-wider mb-2">Nguồn trích dẫn</p>
+        <div class="flex flex-col gap-2">${items}</div>
+      </div>`;
+  }
+
+  function buildSuggestionsHTML(questions) {
+    if (!questions || !questions.length) return '';
+    const btns = questions.map(q =>
+      `<button type="button" class="suggestion-btn text-left px-4 py-2 rounded-full bg-secondary-fixed text-on-secondary-fixed text-sm font-medium hover:opacity-80 transition-opacity inline-flex items-center gap-2">
+         <span class="material-symbols-outlined text-[16px]">lightbulb</span>
+         <span>${escapeHTML(q)}</span>
+       </button>`
+    ).join('');
+    return `<div class="suggestions flex flex-wrap gap-2 mt-4">${btns}</div>`;
+  }
+
+  function escapeHTML(str) {
+    const d = document.createElement('div');
+    d.textContent = str == null ? '' : String(str);
+    return d.innerHTML;
+  }
+
+  function linkify(text) {
+    const escaped = escapeHTML(text);
+    return escaped
+      .replace(/\((https?:\/\/[^\s<)]+)\)/g,
+        '(<a class="text-primary underline" href="$1" target="_blank" rel="noopener">Xem nguồn</a>)')
+      .replace(/(^|[\s>])(https?:\/\/[^\s<]+)/g,
+        '$1<a class="text-primary underline" href="$2" target="_blank" rel="noopener">Xem nguồn</a>');
+  }
+
+  function addBubble(role, text, sources, save = true, suggestions = null) {
+    clearEmpty();
+    const msg = document.createElement('div');
+
+    if (role === 'user') {
+      msg.className = 'flex justify-end';
+      msg.innerHTML = `
+        <div class="max-w-[75%] bg-surface-container-high rounded-2xl rounded-tr-sm px-4 py-3 text-on-surface text-base leading-relaxed whitespace-pre-wrap">${escapeHTML(text)}</div>`;
+    } else {
+      msg.className = 'flex items-start gap-3 max-w-[90%]';
+      const body = document.createElement('div');
+      body.className = 'flex-1 min-w-0';
+      body.innerHTML = `
+        <div class="text-base text-on-surface leading-[1.6] whitespace-pre-wrap">${linkify(text)}</div>`;
+      const avatar = document.createElement('div');
+      avatar.className = 'w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5';
+      avatar.innerHTML = '<span class="material-symbols-outlined text-primary text-[20px]">smart_toy</span>';
+      msg.appendChild(avatar);
+      msg.appendChild(body);
+
+      if (sources && sources.length) body.insertAdjacentHTML('beforeend', buildSourcesHTML(sources));
+      if (suggestions && suggestions.length) {
+        body.insertAdjacentHTML('beforeend', buildSuggestionsHTML(suggestions));
+        body.querySelectorAll('.suggestion-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            document.querySelectorAll('.suggestions').forEach(el => el.remove());
+            inputBox.value = btn.querySelector('span:last-child')?.textContent || btn.textContent;
+            send();
+          });
+        });
+      }
+    }
+
+    messagesInner.appendChild(msg);
+    messagesScroll.scrollTop = messagesScroll.scrollHeight;
+    if (save) saveMessage(role, text, sources, suggestions);
+    return msg;
+  }
+
+  function addTyping() {
+    clearEmpty();
+    const msg = document.createElement('div');
+    msg.className = 'flex items-start gap-3';
+    msg.id = 'typing-msg';
+    msg.innerHTML = `
+      <div class="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+        <span class="material-symbols-outlined text-primary text-[20px]">smart_toy</span>
+      </div>
+      <div class="typing flex items-center gap-1 px-4 py-3 rounded-2xl bg-surface-container-low">
+        <span></span><span></span><span></span>
+      </div>`;
+    messagesInner.appendChild(msg);
+    messagesScroll.scrollTop = messagesScroll.scrollHeight;
+  }
+  function removeTyping() { document.getElementById('typing-msg')?.remove(); }
+
+  async function send() {
+    const text = inputBox.value.trim();
+    if (!text || sendBtn.disabled) return;
+    inputBox.value = '';
+    inputBox.style.height = 'auto';
+    sendBtn.disabled = true;
+
+    ensureSession();
+    addBubble('user', text);
+    addTyping();
+
+    try {
+      const resp = await fetch(`${API_BASE}/api/chat/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: text,
+          session_id: currentSessionId,
+          user_id: currentUserId,
+          domain: document.getElementById('domainSelect').value,
+          history: []
+        })
+      });
+      removeTyping();
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      document.querySelectorAll('.suggestions').forEach(el => el.remove());
+      addBubble('ai', data.answer, data.sources || [], true, data.suggested_questions || []);
+    } catch (err) {
+      removeTyping();
+      addBubble('ai', `Lỗi kết nối: ${err.message}. Kiểm tra server đang chạy tại localhost:8000.`);
+    } finally {
+      sendBtn.disabled = false;
+      inputBox.focus();
+    }
+  }
+
+  inputBox.addEventListener('input', () => {
+    inputBox.style.height = 'auto';
+    inputBox.style.height = Math.min(inputBox.scrollHeight, 200) + 'px';
+  });
+  inputBox.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  sendBtn.addEventListener('click', send);
+
+  document.getElementById('newChatBtn').addEventListener('click', () => {
+    currentSessionId = crypto.randomUUID();
+    localStorage.setItem(currentSessionKey(currentUserId), currentSessionId);
+    showEmpty();
+    renderSessionList();
+  });
+
+  document.getElementById('clearAllBtn').addEventListener('click', deleteAllSessions);
+
+  userSelect.addEventListener('change', () => {
+    currentUserId = userSelect.value;
+    localStorage.setItem('ttt_user_id', currentUserId);
+    sessions = JSON.parse(localStorage.getItem(sessionKey(currentUserId)) || '[]');
+    currentSessionId = localStorage.getItem(currentSessionKey(currentUserId)) || crypto.randomUUID();
+    localStorage.setItem(currentSessionKey(currentUserId), currentSessionId);
+    loadSession(currentSessionId);
+  });
+
+  renderSessionList();
+  loadSession(currentSessionId);
+</script>
+</body>
+</html>
