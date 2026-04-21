@@ -22,4 +22,3 @@ tiktoken
 numpy
 sentence-transformers
 pytest-asyncio
-qui
