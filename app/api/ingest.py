@@ -69,10 +69,12 @@ async def ingest_file(
         meta["url"] = url.strip()
 
     # Upload file gốc lên S3 → user click link tải về xem bản gốc
+    # Cấu trúc: docs/<domain-slug>/<sha256>.<ext>
     if s3_client.is_configured():
         try:
+            prefix = f"{s3_client.PREFIX_DOCS}/{s3_client.slugify_domain(domain)}"
             s3_url = s3_client.upload_file(
-                tmp_path, prefix=s3_client.PREFIX_DOCS,
+                tmp_path, prefix=prefix,
                 original_name=file.filename,
             )
             meta["url"] = s3_url  # override: S3 là source of truth cho file đã upload
@@ -224,10 +226,12 @@ async def ingest_video_file(
     meta = _build_metadata_dict(title, domain, description, tags, url)
 
     # Upload video gốc lên S3 → user click link phát trực tiếp (ACL public-read)
+    # Cấu trúc: videos/<domain-slug>/<sha256>.<ext>
     if s3_client.is_configured():
         try:
+            prefix = f"{s3_client.PREFIX_VIDEOS}/{s3_client.slugify_domain(domain)}"
             s3_url = s3_client.upload_file(
-                tmp_path, prefix=s3_client.PREFIX_VIDEOS,
+                tmp_path, prefix=prefix,
                 original_name=file.filename,
             )
             meta["url"] = s3_url

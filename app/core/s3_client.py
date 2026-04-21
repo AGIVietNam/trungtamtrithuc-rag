@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import mimetypes
+import re
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from typing import Final
@@ -27,8 +29,30 @@ logger = logging.getLogger(__name__)
 
 PREFIX_DOCS: Final[str] = "docs"
 PREFIX_VIDEOS: Final[str] = "videos"
+UNSORTED_DOMAIN: Final[str] = "unsorted"
 
 _CHUNK_SIZE_FOR_HASH = 64 * 1024  # 64KB đọc từng chunk khi hash file lớn
+
+
+def slugify_domain(domain: str | None) -> str:
+    """Chuyển tên domain tiếng Việt → subfolder S3 ASCII-safe.
+
+    'công nghệ thông tin' → 'cong-nghe-thong-tin'
+    'Pháp lý'             → 'phap-ly'
+    '' / None             → UNSORTED_DOMAIN
+
+    Tránh ký tự lạ trong URL (dù S3 hỗ trợ UTF-8, URL percent-encode rắc rối).
+    """
+    if not domain:
+        return UNSORTED_DOMAIN
+    # Thay đ/Đ bằng d TRƯỚC khi normalize (đ không decompose NFKD)
+    src = domain.strip().lower().replace("đ", "d")
+    # Bỏ dấu tiếng Việt (NFKD → strip combining marks)
+    normalized = unicodedata.normalize("NFKD", src)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    # collapse mọi ký tự không phải a-z0-9 thành dấu gạch
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")
+    return slug or UNSORTED_DOMAIN
 
 
 @lru_cache(maxsize=1)
