@@ -90,6 +90,11 @@ def _get_chain() -> RAGChain:
         url=QDRANT_VMEDIA_URL, vmedia_api_key=QDRANT_VMEDIA_API_KEY,
         collections=VMEDIA_COLLECTIONS,
     )
+    logger.info(
+        "_get_chain init: qdrant_url=%s docs=%s videos=%s vector_name=%r",
+        QDRANT_URL[:50], COLLECTION_DOCS, COLLECTION_VIDEOS,
+        qdrant_docs.vector_name,
+    )
 
     # Đảm bảo payload index `domain` tồn tại TRƯỚC khi search có filter.
     # Lifespan startup cũng gọi, nhưng nếu server deploy code mới mà không
