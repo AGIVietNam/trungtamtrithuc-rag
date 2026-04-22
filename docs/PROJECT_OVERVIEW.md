@@ -355,7 +355,7 @@ User query
     │
     ▼
 [GUARD] chain._should_refuse(hits)
-    hits rỗng hoặc top_score < 0.25 → trả refusal template cứng,
+    hits rỗng hoặc top_score < 0.18 → trả refusal template cứng,
     KHÔNG gọi Claude (tiết kiệm $ + chặn hallucinate ở gốc)
     │
     ▼
@@ -428,7 +428,7 @@ claude usage [sync]: in=12840 cache_write=500  cache_read=8200 out=580   # turn 
 
 ### Guard ngưỡng tin cậy (pre-LLM refusal)
 
-`_MIN_CONFIDENCE_TO_ANSWER = 0.25` (BGE reranker score, [−∞, +∞]). Nếu `hits` rỗng hoặc `hits[0].score < 0.25` → trả refusal template cứng ngay, **KHÔNG gọi Claude**. Chặn hallucinate từ training data ngay ở gốc, tiết kiệm luôn 1 lần gọi Sonnet:
+`_MIN_CONFIDENCE_TO_ANSWER = 0.18` (BGE reranker score, [−∞, +∞]). Nếu `hits` rỗng hoặc `hits[0].score < 0.18` → trả refusal template cứng ngay, **KHÔNG gọi Claude**. Chặn hallucinate từ training data ngay ở gốc, tiết kiệm luôn 1 lần gọi Sonnet. Ngưỡng 0.18 (hạ từ 0.25 ban đầu) nới cho query tổng quan/liệt kê match được chunk cụ thể trong doc; lớp `<refusal_protocol>` trong system prompt vẫn là rào cuối khi Claude thấy docs không nói đến chủ đề:
 
 ```
 Tài liệu TDI hiện chưa có thông tin về câu hỏi này.
@@ -479,7 +479,7 @@ POST /api/chat/ {message, session_id, user_id, domain}
   │     │   ├─ retriever.retrieve(query_vec=vec)   # doc RAG (ttt_* + vmedia_*)
   │     │   └─ conv_memory.retrieve(query_vec=vec) # tầng 3 — skip nếu chào/ack
   │     ├─ reranker.rerank()               # GPU auto (cuda > mps > cpu)
-  │     ├─ _should_refuse(hits)            # pre-LLM guard, score < 0.25 → refusal
+  │     ├─ _should_refuse(hits)            # pre-LLM guard, score < 0.18 → refusal
   │     ├─ build_system_prompt(domain)     # stable → cache breakpoint #1
   │     ├─ build_documents_block(hits)     # <retrieved_documents>
   │     ├─ build_conversation_block()      # <user_context> + <session_summary>
@@ -736,7 +736,7 @@ POST /api/chat/stream
            retriever.retrieve(query_vec=vec)
            conv_memory.retrieve(query_vec=vec)  # skip nếu chào/ack
       → CrossEncoderReranker (GPU auto) → top RERANK_TOP_K=5
-      → _should_refuse(hits): score < 0.25 → emit refusal SSE, không gọi Claude
+      → _should_refuse(hits): score < 0.18 → emit refusal SSE, không gọi Claude
       → build system_prompt (domain + _BASE_RULES, cache_control)
       → build user_turn: <retrieved_documents> + <user_context> +
                          <session_summary> + <task> + "Câu hỏi của tôi: …"
@@ -757,7 +757,7 @@ Fallback JSON tại `POST /api/chat/` giữ nguyên contract cho client chưa h�
 - ~~**Streaming response**~~ ✅ `POST /api/chat/stream` SSE, FE render token dần.
 - ~~**Prompt cache tối ưu**~~ ✅ 2 breakpoint (system stable + history assistant). Cache HIT từ turn 2 trở đi, cắt ~5-10× cost prompt ổn định.
 - ~~**GPU reranker**~~ ✅ Auto-detect cuda > mps > cpu + warmup lifespan.
-- ~~**Pre-LLM refusal guard**~~ ✅ `_should_refuse(hits)` score < 0.25.
+- ~~**Pre-LLM refusal guard**~~ ✅ `_should_refuse(hits)` score < 0.18 (nới từ 0.25 để query tổng quan qua được khi vẫn có chunk liên quan).
 - ~~**S3 domain-slug layout**~~ ✅ `docs/<domain-slug>/<sha256>.<ext>`.
 - **Auth thật** — hiện `user_id` là string tự do client truyền; tích hợp đăng nhập để verify + chống impersonate memory của user khác.
 - **User profile extract** — tách fact cá nhân (tên, team, ngân sách, preference) ra block riêng thay vì lẫn trong recall pairs — tăng độ bền trước khi recall score rơi dưới threshold.

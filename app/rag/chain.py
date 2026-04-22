@@ -30,7 +30,10 @@ _SUGGESTION_PATTERN = re.compile(
 # Ngưỡng top rerank score tối thiểu để coi là có context trả lời.
 # Dưới ngưỡng → trả refusal cứng (không gọi Claude, tránh hallucinate từ training data).
 # BGE reranker score: >0.5 rất liên quan; 0.0-0.5 mờ; <0 không liên quan.
-_MIN_CONFIDENCE_TO_ANSWER: float = 0.25
+# 0.18 (hạ từ 0.25) — thả lỏng cho query overview/liệt kê match được một chunk
+# cụ thể; <refusal_protocol> trong system prompt vẫn là lớp chặn cuối nếu doc
+# thực sự không nói tới chủ đề.
+_MIN_CONFIDENCE_TO_ANSWER: float = 0.18
 
 _REFUSAL_TEMPLATE = (
     "Tài liệu TDI hiện chưa có thông tin về câu hỏi này.\n\n"
