@@ -61,6 +61,19 @@ async def _lifespan(app: FastAPI):
         except Exception:
             logger.exception("conv_memory ensure_indexes failed")
 
+        # Tạo payload index `domain` cho ttt_documents + ttt_videos (idempotent).
+        # Retriever gắn filter `domain` khi FE gửi domain thật (bim/mep/cntt...).
+        # Cluster mới chưa có index → Qdrant 400 → hits=[] → chain luôn trả
+        # refusal 226 char dù tài liệu đã upsert đúng domain. Tự setup ở đây
+        # để không phải chạy curl tay trên từng cluster khi deploy môi trường mới.
+        try:
+            from app.api.chat import _get_chain
+            chain = _get_chain()
+            chain.retriever.qdrant_docs.ensure_payload_indexes(["domain"])
+            chain.retriever.qdrant_videos.ensure_payload_indexes(["domain"])
+        except Exception:
+            logger.exception("qdrant ensure_payload_indexes failed")
+
     # Chạy trong thread riêng để không block event loop (model load CPU-bound).
     try:
         await asyncio.to_thread(_warmup)

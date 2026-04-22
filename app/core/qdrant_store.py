@@ -68,6 +68,34 @@ class QdrantStore:
         self._req("PUT", f"/collections/{self.collection}", body)
         logger.info("qdrant collection '%s' created", self.collection)
 
+    def ensure_payload_indexes(self, fields: list[str]) -> None:
+        """Tạo payload keyword index (idempotent) cho các field cần filter exact-match.
+
+        Qdrant trả 400 cho mọi `filter.match` trên field thiếu index. Retriever
+        gắn filter `domain` khi request có domain ≠ {"mặc định","general"} →
+        cluster mới chưa có index là gãy ngay. Gọi 1 lần lúc lifespan startup
+        để tự setup, khỏi phải chạy curl tay trên mỗi cluster.
+
+        Không raise: collection có thể chưa tồn tại ở lần startup đầu (chưa
+        upsert pair/doc nào). Lần restart sau pair đầu tiên sẽ tạo collection,
+        lần đó index sẽ tạo thành công.
+        """
+        for field in fields:
+            try:
+                self._req(
+                    "PUT",
+                    f"/collections/{self.collection}/index?wait=true",
+                    {"field_name": field, "field_schema": "keyword"},
+                )
+                logger.info(
+                    "qdrant ensured payload index: %s.%s", self.collection, field
+                )
+            except Exception as exc:
+                logger.warning(
+                    "qdrant ensure_payload_indexes(%s.%s) skipped: %s",
+                    self.collection, field, exc,
+                )
+
     def upsert(self, points: list[dict], wait: bool = True) -> None:
         for i in range(0, len(points), UPSERT_BATCH):
             batch = points[i : i + UPSERT_BATCH]
