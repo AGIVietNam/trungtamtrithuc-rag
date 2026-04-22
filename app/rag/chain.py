@@ -249,8 +249,13 @@ class RAGChain:
             t_rerank - t_retrieve, t_claude - t_rerank, t_claude - t0,
             "yes" if do_recall else "skipped", len(hits),
         )
+
+        final_answer = answer_text
+        if suggested_questions and "Gợi ý" not in final_answer:
+            final_answer += "\n\n--- GỢI Ý ---\n" + "\n".join([f"{i+1}. {q}" for i, q in enumerate(suggested_questions)])
+
         return {
-            "answer": answer_text,
+            "answer": final_answer,
             "sources": source_mapping if has_sources else [],
             "confidence": _confidence(top_score),
             "suggested_questions": suggested_questions,
@@ -366,9 +371,13 @@ class RAGChain:
         clean_answer, suggested_questions = _extract_suggestions(full_text)
         has_sources = "Nguồn:" in clean_answer or "nguồn:" in clean_answer.lower()
 
+        final_output = full_text
+        if suggested_questions and "Gợi ý" not in final_output:
+            final_output += "\n\n--- GỢI Ý ---\n" + "\n".join([f"{i+1}. {q}" for i, q in enumerate(suggested_questions)])
+
         yield {
             "type": "done",
-            "answer": full_text,
+            "answer": final_output,
             "sources": source_mapping if has_sources else [],
             "suggested_questions": suggested_questions,
         }
