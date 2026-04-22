@@ -251,7 +251,8 @@ class RAGChain:
         )
 
         final_answer = answer_text
-        if suggested_questions and "Gợi ý" not in final_answer:
+        # Only append if we HAVE questions but they WEREN'T found (stripped) from the text
+        if suggested_questions and len(clean_answer) >= len(answer_text):
             final_answer += "\n\n--- GỢI Ý ---\n" + "\n".join([f"{i+1}. {q}" for i, q in enumerate(suggested_questions)])
 
         return {
@@ -372,7 +373,8 @@ class RAGChain:
         has_sources = "Nguồn:" in clean_answer or "nguồn:" in clean_answer.lower()
 
         final_output = full_text
-        if suggested_questions and "Gợi ý" not in final_output:
+        # Only append if we HAVE questions but they WEREN'T found (stripped) from the text
+        if suggested_questions and len(clean_answer) >= len(full_text):
             final_output += "\n\n--- GỢI Ý ---\n" + "\n".join([f"{i+1}. {q}" for i, q in enumerate(suggested_questions)])
 
         yield {
