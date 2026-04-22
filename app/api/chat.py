@@ -91,6 +91,17 @@ def _get_chain() -> RAGChain:
         collections=VMEDIA_COLLECTIONS,
     )
 
+    # Đảm bảo payload index `domain` tồn tại TRƯỚC khi search có filter.
+    # Lifespan startup cũng gọi, nhưng nếu server deploy code mới mà không
+    # restart đúng cách (hoặc lifespan fail) thì index chưa có → Qdrant 400
+    # → _search_one nuốt exception → hits=0 → refusal sai.
+    # Gọi ở đây (idempotent) đảm bảo index luôn sẵn sàng.
+    try:
+        qdrant_docs.ensure_payload_indexes(["domain"])
+        qdrant_videos.ensure_payload_indexes(["domain"])
+    except Exception:
+        logger.warning("_get_chain: ensure_payload_indexes failed", exc_info=True)
+
     retriever = Retriever(
         voyage=voyage,
         qdrant_docs=qdrant_docs,

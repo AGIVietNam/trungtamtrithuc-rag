@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.voyage_embed import VoyageEmbedder
 from app.core.qdrant_store import QdrantStore, VMediaReadOnlyStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,9 +41,14 @@ class Retriever:
         top_k: int,
         qdrant_filter: dict | None = None,
     ) -> list[Hit]:
+        col = getattr(store, "collection", "vmedia")
         try:
             hits = store.search(query_vec, limit=top_k, filter=qdrant_filter)
-            col = getattr(store, "collection", "vmedia")
+            logger.debug(
+                "retriever _search_one %s/%s: %d hits (filter=%s)",
+                col, source_type, len(hits),
+                bool(qdrant_filter),
+            )
             return [
                 Hit(
                     text=h.get("payload", {}).get("text", ""),
@@ -52,6 +60,11 @@ class Retriever:
                 for h in hits
             ]
         except Exception:
+            logger.exception(
+                "retriever _search_one FAILED: collection=%s source_type=%s "
+                "filter=%s",
+                col, source_type, qdrant_filter,
+            )
             return []
 
     def retrieve(

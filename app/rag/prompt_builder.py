@@ -286,7 +286,7 @@ Chọn format theo dạng câu hỏi:
 
 <citation_rules>
 - Trong phần nội dung: trích nguồn bằng TÊN tài liệu (vd: "(CHÂN DUNG ĐỐI TƯỢNG...)", không dùng "[NGUỒN 1]").
-- Nếu câu trả lời có dùng tài liệu: kết thúc bằng đúng 1 dòng "Nguồn:" liệt kê tên tài liệu, kèm link nếu có.
+- Nếu câu trả lời có dùng tài liệu: kết thúc bằng đúng 1 dòng "Nguồn:" liệt kê tên tài liệu — bắt buộc kèm URL ngay sau tên nếu trong <source> có URL, dạng: "Tên tài liệu — https://...". Cấm bỏ URL.
 - Nếu câu trả lời chỉ dùng dữ kiện user (không dùng tài liệu): ghi "Nguồn: Thông tin bạn đã cung cấp trong cuộc trò chuyện."
 - Với câu xã giao (chào hỏi, cảm ơn, giới thiệu bản thân, trò chuyện thường): trả lời tự nhiên, BỎ mục "Nguồn:" và BỎ khối "---GỢI Ý---".
 </citation_rules>
