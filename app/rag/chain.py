@@ -23,7 +23,24 @@ from app.rag.prompt_builder import (
 logger = logging.getLogger(__name__)
 
 _SUGGESTION_PATTERN = re.compile(
-    r"\n*---GỢI Ý---\s*\n(.*)",
+    # Chấp nhận các biến thể marker mà Opus/Sonnet có thể đẻ ra khi không
+    # tuân thủ literal 100%: "---GỢI Ý---", "--- Gợi ý ---", "**Gợi ý:**",
+    # "## Gợi ý", "Gợi ý câu hỏi:"... Luôn yêu cầu marker đứng riêng 1 dòng
+    # (có newline trước + sau) để tránh false-positive với "gợi ý" trong body.
+    r"\n[ \t]*"                                    # đầu dòng (newline + indent)
+    r"[\*#\-=_|: \t]*"                             # decorator mở (tuỳ chọn)
+    r"G[ỢợOo][Ii][ \t]*[ÝýYy]"                    # "Gợi ý" / "GỢI Ý" (diacritic flex)
+    r"(?:[ \t]+(?:c[âấ]u[ \t]*h[ỏỎ]i|tiếp[ \t]*theo|theo[ \t]*dõi))?"  # optional suffix
+    r"[\*#\-=_|:\. \t]*"                           # decorator đóng (tuỳ chọn)
+    r"\n+"
+    r"(\s*\d+[\.\)].*)",                           # content phải bắt đầu "1. " hoặc "1) "
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Fallback: LLM quên hẳn marker nhưng vẫn liệt kê 2-5 câu hỏi đánh số ở cuối.
+# Yêu cầu: đứng sau dòng trống + là khối cuối cùng của answer.
+_TRAILING_NUMBERED_PATTERN = re.compile(
+    r"\n\s*\n((?:[ \t]*\d+[\.\)][ \t]+[^\n]+(?:\n|$)){2,5})\s*$",
     re.DOTALL,
 )
 
@@ -52,19 +69,49 @@ def _should_refuse(hits: list) -> bool:
     return top < _MIN_CONFIDENCE_TO_ANSWER
 
 
+def _parse_numbered_questions(raw: str) -> list[str]:
+    """Trích câu hỏi từ block kiểu "1. ...\\n2. ...\\n3. ..."."""
+    questions: list[str] = []
+    for line in raw.splitlines():
+        stripped = re.sub(r"^\s*\d+[\.\)]\s*", "", line).strip()
+        # Strip markdown decorators (bold, italic)
+        stripped = re.sub(r"^[\*_`]+|[\*_`]+$", "", stripped).strip()
+        if stripped:
+            questions.append(stripped)
+    return questions
+
+
 def _extract_suggestions(answer: str) -> tuple[str, list[str]]:
-    """Split answer into (clean_answer, suggested_questions)."""
+    """Split answer into (clean_answer, suggested_questions).
+
+    Thử 2 chiến lược theo thứ tự:
+      1. Marker "GỢI Ý" (nhiều biến thể) + numbered list phía sau.
+      2. Fallback: trailing numbered block 2-5 dòng ở cuối answer.
+
+    Nếu cả 2 fail → trả về (answer, []) — LLM không emit gợi ý.
+    """
     m = _SUGGESTION_PATTERN.search(answer)
-    if not m:
-        return answer, []
-    clean = answer[: m.start()].rstrip()
-    raw = m.group(1).strip()
-    questions = [
-        re.sub(r"^\d+\.\s*", "", line).strip()
-        for line in raw.splitlines()
-        if line.strip()
-    ]
-    return clean, [q for q in questions if q]
+    if m:
+        clean = answer[: m.start()].rstrip()
+        questions = _parse_numbered_questions(m.group(1))
+        if questions:
+            logger.debug("suggestions extracted via marker: %d items", len(questions))
+            return clean, questions
+
+    # Fallback: không có marker nhưng có block đánh số ở cuối.
+    m2 = _TRAILING_NUMBERED_PATTERN.search(answer)
+    if m2:
+        questions = _parse_numbered_questions(m2.group(1))
+        if len(questions) >= 2:
+            clean = answer[: m2.start()].rstrip()
+            logger.info(
+                "suggestions extracted via trailing-numbered fallback: %d items "
+                "(LLM bỏ marker — xem lại prompt nếu lặp lại)",
+                len(questions),
+            )
+            return clean, questions
+
+    return answer, []
 
 
 def _confidence(top_score: float) -> str:
