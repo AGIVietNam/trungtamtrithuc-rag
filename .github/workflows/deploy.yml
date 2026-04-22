@@ -57,6 +57,9 @@ jobs:
             cd "\$PROJECT_PATH_RESOLVED"
             pwd && ls -la
             export DEPLOY_BRANCH="${DEPLOY_BRANCH}"
+            echo "[INFO] Forcing update to latest code..."
+            git fetch origin "\$DEPLOY_BRANCH"
+            git reset --hard "origin/\$DEPLOY_BRANCH"
             bash bin/release.sh
           EOF
           echo "Deployment completed on ${{ github.ref_name }}"
