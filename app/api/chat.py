@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Iterator
 
 from fastapi import APIRouter, BackgroundTasks
@@ -162,10 +163,13 @@ def _post_turn_memory_update(
 
 @router.post("/", response_model=ChatResponse)
 async def chat(request: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
+    t0 = time.perf_counter()
     chain = _get_chain()
+    t_chain = time.perf_counter()
 
     history = memory.get_history(request.session_id)
     summary = memory.get_summary(request.session_id)
+    t_mem = time.perf_counter()
 
     domain = request.domain if request.domain and request.domain not in ("general", "mặc định") else None
     effective_user_id = (request.user_id or "").strip() or request.session_id
@@ -182,11 +186,19 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks) -> ChatR
         )
     except Exception as exc:
         logger.exception("RAG chain error: %s", exc)
+        logger.info(
+            "POST /api/chat FAILED (session=%s): init=%.3fs mem=%.3fs chain=%.3fs total=%.3fs",
+            request.session_id,
+            t_chain - t0, t_mem - t_chain,
+            time.perf_counter() - t_mem,
+            time.perf_counter() - t0,
+        )
         return ChatResponse(
             answer=f"Lỗi xử lý: {exc}",
             sources=[],
             session_id=request.session_id,
         )
+    t_chain_done = time.perf_counter()
 
     # Schedule memory update AFTER response is returned
     background_tasks.add_task(
@@ -196,6 +208,17 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks) -> ChatR
         user_msg=request.message,
         assistant_msg=result["answer"],
         domain=request.domain or "mặc định",
+    )
+    t_end = time.perf_counter()
+    logger.info(
+        "POST /api/chat steps (session=%s): init=%.3fs mem=%.3fs chain=%.3fs schedule_bg=%.3fs total=%.3fs (refused=%s)",
+        request.session_id,
+        t_chain - t0,
+        t_mem - t_chain,
+        t_chain_done - t_mem,
+        t_end - t_chain_done,
+        t_end - t0,
+        result.get("refused", False),
     )
 
     return ChatResponse(
@@ -211,9 +234,12 @@ async def chat_stream(
     request: ChatRequest, background_tasks: BackgroundTasks
 ) -> StreamingResponse:
     """SSE streaming endpoint — emits `meta`, `delta`, `done`, `error` events."""
+    t0 = time.perf_counter()
     chain = _get_chain()
+    t_chain = time.perf_counter()
     history = memory.get_history(request.session_id)
     summary = memory.get_summary(request.session_id)
+    t_mem = time.perf_counter()
 
     domain = (
         request.domain
@@ -223,6 +249,8 @@ async def chat_stream(
     effective_user_id = (request.user_id or "").strip() or request.session_id
 
     def event_generator() -> Iterator[str]:
+        t_stream_start = time.perf_counter()
+        t_first_delta: float | None = None
         final_answer = ""
         try:
             for event in chain.answer_stream(
@@ -234,14 +262,37 @@ async def chat_stream(
                 summary=summary,
                 conv_memory=_get_conv_memory(),
             ):
-                if event.get("type") == "done":
+                etype = event.get("type")
+                if etype == "delta" and t_first_delta is None:
+                    t_first_delta = time.perf_counter()
+                if etype == "done":
                     final_answer = event.get("answer", "") or ""
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:
             logger.exception("RAG stream error: %s", exc)
+            logger.info(
+                "POST /api/chat/stream FAILED (session=%s): init=%.3fs mem=%.3fs stream=%.3fs total=%.3fs",
+                request.session_id,
+                t_chain - t0, t_mem - t_chain,
+                time.perf_counter() - t_mem,
+                time.perf_counter() - t0,
+            )
             err = {"type": "error", "message": str(exc)}
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
             return
+
+        t_stream_end = time.perf_counter()
+        ttfb = (t_first_delta - t_stream_start) if t_first_delta else None
+        logger.info(
+            "POST /api/chat/stream steps (session=%s): init=%.3fs mem=%.3fs ttfb=%s stream=%.3fs total=%.3fs (answer=%d chars)",
+            request.session_id,
+            t_chain - t0,
+            t_mem - t_chain,
+            f"{ttfb:.3f}s" if ttfb is not None else "n/a",
+            t_stream_end - t_stream_start,
+            t_stream_end - t0,
+            len(final_answer),
+        )
 
         if final_answer:
             background_tasks.add_task(

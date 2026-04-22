@@ -1,20 +1,41 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.config import API_HOST, API_PORT
+from app.config import API_HOST, API_PORT, LOG_DIR
 
 # `app.ingestion.doc_pipeline` gắn FileHandler lên root logger (catch mọi
 # module), nhưng level root mặc định = WARNING → INFO bị filter trước khi
 # tới handler. Bật INFO cho namespace `app` để các log timing trong
 # RAGChain.answer + claude usage trong claude_client xuất hiện. Không động
 # tới root → urllib3/anthropic/etc. vẫn yên.
-logging.getLogger("app").setLevel(logging.INFO)
+_app_logger = logging.getLogger("app")
+_app_logger.setLevel(logging.INFO)
+
+# File handler: ghi mọi log namespace `app.*` (middleware timing, endpoint
+# step breakdown, RAGChain, pipelines) ra file xoay vòng theo ngày. Tách
+# biệt với ingest log cũ trong doc_pipeline.py để không bị trộn format.
+_API_LOG_FILE = LOG_DIR / "api.log"
+if not any(
+    isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == str(_API_LOG_FILE)
+    for h in _app_logger.handlers
+):
+    _fh = TimedRotatingFileHandler(
+        _API_LOG_FILE, when="midnight", backupCount=14, encoding="utf-8",
+    )
+    _fh.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+    ))
+    _fh.setLevel(logging.INFO)
+    _app_logger.addHandler(_fh)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +77,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Log tổng thời gian mỗi request. Step-level timing được log trong từng
+# endpoint/pipeline (xem app.api.ingest, app.rag.chain) — middleware này chỉ
+# ghi "wall clock" toàn API để so sánh với step breakdown.
+@app.middleware("http")
+async def log_request_duration(request: Request, call_next):
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed = time.perf_counter() - start
+        logger.exception(
+            "API %s %s failed after %.3fs",
+            request.method, request.url.path, elapsed,
+        )
+        raise
+    elapsed = time.perf_counter() - start
+    logger.info(
+        "API %s %s → %d in %.3fs",
+        request.method, request.url.path, response.status_code, elapsed,
+    )
+    response.headers["X-Process-Time"] = f"{elapsed:.3f}"
+    return response
 
 # Routes registered lazily to avoid circular imports at startup
 from app.api import ingest, chat  # noqa: E402

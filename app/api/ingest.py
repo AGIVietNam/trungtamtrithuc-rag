@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, UploadFile
@@ -42,6 +43,7 @@ async def ingest_file(
     tags: str = Form(default=""),
     url: str = Form(default=""),
 ) -> IngestResponse:
+    t0 = time.perf_counter()
     suffix = Path(file.filename).suffix.lower()
     if suffix not in (".pdf", ".docx", ".doc", ".txt", ".md", ".xlsx"):
         return IngestResponse(
@@ -54,6 +56,7 @@ async def ingest_file(
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
+    t_upload = time.perf_counter()
 
     # Build metadata from form fields
     meta = {}
@@ -70,6 +73,7 @@ async def ingest_file(
 
     # Upload file gốc lên S3 → user click link tải về xem bản gốc
     # Cấu trúc: docs/<domain-slug>/<sha256>.<ext>
+    s3_done = False
     if s3_client.is_configured():
         try:
             prefix = f"{s3_client.PREFIX_DOCS}/{s3_client.slugify_domain(domain)}"
@@ -78,14 +82,26 @@ async def ingest_file(
                 original_name=file.filename,
             )
             meta["url"] = s3_url  # override: S3 là source of truth cho file đã upload
+            s3_done = True
         except Exception:
             logger.warning("S3 upload failed for %s — ingest continues without source_url", file.filename, exc_info=True)
+    t_s3 = time.perf_counter()
 
     try:
         result = ingest_document(
             file_path=tmp_path,
             original_name=title.strip() or file.filename,
             metadata=meta if meta else None,
+        )
+        t_ingest = time.perf_counter()
+        logger.info(
+            "POST /api/ingest/file steps (%s): upload=%.3fs s3=%.3fs%s ingest=%.3fs total=%.3fs (chunks=%d, pages=%d)",
+            file.filename,
+            t_upload - t0,
+            t_s3 - t_upload, "" if s3_done else " [skip]",
+            t_ingest - t_s3,
+            t_ingest - t0,
+            result.num_chunks, result.num_pages,
         )
         return IngestResponse(
             status="ok",
@@ -94,6 +110,13 @@ async def ingest_file(
         )
     except Exception as exc:
         logger.exception("Ingest error for %s: %s", file.filename, exc)
+        logger.info(
+            "POST /api/ingest/file FAILED (%s): upload=%.3fs s3=%.3fs ingest=%.3fs total=%.3fs",
+            file.filename,
+            t_upload - t0, t_s3 - t_upload,
+            time.perf_counter() - t_s3,
+            time.perf_counter() - t0,
+        )
         return IngestResponse(
             status="error",
             chunks_added=0,
@@ -117,6 +140,7 @@ async def preview_file_metadata(file: UploadFile = File(...)) -> dict:
 
     KHÔNG lưu vào Qdrant. User có thể review/sửa trước khi submit thực sự.
     """
+    t0 = time.perf_counter()
     suffix = Path(file.filename).suffix.lower()
     if suffix not in _DOC_SUFFIXES:
         return {
@@ -129,6 +153,7 @@ async def preview_file_metadata(file: UploadFile = File(...)) -> dict:
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
+    t_upload = time.perf_counter()
 
     try:
         from app.ingestion.doc_parser import parse
@@ -142,10 +167,19 @@ async def preview_file_metadata(file: UploadFile = File(...)) -> dict:
             text_sample = "\n\n".join(pages)
         else:
             text_sample = str(raw_content)
+        t_parse = time.perf_counter()
 
         meta = generate_document_metadata(
             text_sample=text_sample,
             filename=file.filename,
+        )
+        t_ai = time.perf_counter()
+
+        logger.info(
+            "POST /api/ingest/file/preview steps (%s): upload=%.3fs parse=%.3fs ai_meta=%.3fs total=%.3fs (sample=%d chars, ai_ok=%s)",
+            file.filename,
+            t_upload - t0, t_parse - t_upload, t_ai - t_parse, t_ai - t0,
+            len(text_sample), meta is not None,
         )
 
         if meta is None:
@@ -162,6 +196,10 @@ async def preview_file_metadata(file: UploadFile = File(...)) -> dict:
         }
     except Exception as exc:
         logger.exception("Preview metadata error for %s: %s", file.filename, exc)
+        logger.info(
+            "POST /api/ingest/file/preview FAILED (%s): upload=%.3fs total=%.3fs",
+            file.filename, t_upload - t0, time.perf_counter() - t0,
+        )
         return {
             "status": "error",
             "message": f"Lỗi phân tích file: {exc}",
@@ -210,6 +248,7 @@ async def ingest_video_file(
     tags: str = Form(default=""),
     url: str = Form(default=""),
 ) -> IngestResponse:
+    t0 = time.perf_counter()
     suffix = Path(file.filename).suffix.lower()
     if suffix not in VIDEO_SUFFIXES:
         return IngestResponse(
@@ -222,11 +261,13 @@ async def ingest_video_file(
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
+    t_upload = time.perf_counter()
 
     meta = _build_metadata_dict(title, domain, description, tags, url)
 
     # Upload video gốc lên S3 → user click link phát trực tiếp (ACL public-read)
     # Cấu trúc: videos/<domain-slug>/<sha256>.<ext>
+    s3_done = False
     if s3_client.is_configured():
         try:
             prefix = f"{s3_client.PREFIX_VIDEOS}/{s3_client.slugify_domain(domain)}"
@@ -235,8 +276,10 @@ async def ingest_video_file(
                 original_name=file.filename,
             )
             meta["url"] = s3_url
+            s3_done = True
         except Exception:
             logger.warning("S3 upload failed for %s — ingest continues without source_url", file.filename, exc_info=True)
+    t_s3 = time.perf_counter()
 
     try:
         from app.ingestion.video_pipeline import ingest_video_file as _ingest_video
@@ -244,6 +287,16 @@ async def ingest_video_file(
             local_path=tmp_path,
             original_name=file.filename,
             metadata=meta if meta else None,
+        )
+        t_ingest = time.perf_counter()
+        logger.info(
+            "POST /api/ingest/video/file steps (%s): upload=%.3fs s3=%.3fs%s transcribe+embed=%.3fs total=%.3fs (chunks=%d)",
+            file.filename,
+            t_upload - t0,
+            t_s3 - t_upload, "" if s3_done else " [skip]",
+            t_ingest - t_s3,
+            t_ingest - t0,
+            result.num_chunks,
         )
         return IngestResponse(
             status="ok",
@@ -259,6 +312,13 @@ async def ingest_video_file(
         )
     except Exception as exc:
         logger.exception("Video ingest error for %s: %s", file.filename, exc)
+        logger.info(
+            "POST /api/ingest/video/file FAILED (%s): upload=%.3fs s3=%.3fs transcribe=%.3fs total=%.3fs",
+            file.filename,
+            t_upload - t0, t_s3 - t_upload,
+            time.perf_counter() - t_s3,
+            time.perf_counter() - t0,
+        )
         return IngestResponse(
             status="error",
             chunks_added=0,
@@ -276,6 +336,7 @@ async def preview_video_metadata(file: UploadFile = File(...)) -> dict:
 
     KHÔNG upsert Qdrant. Có thể mất 30s-2 phút do Whisper.
     """
+    t0 = time.perf_counter()
     suffix = Path(file.filename).suffix.lower()
     if suffix not in VIDEO_SUFFIXES:
         return {
@@ -288,6 +349,7 @@ async def preview_video_metadata(file: UploadFile = File(...)) -> dict:
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
+    t_upload = time.perf_counter()
 
     try:
         from app.ingestion.video_transcriber import get_transcriber
@@ -299,10 +361,20 @@ async def preview_video_metadata(file: UploadFile = File(...)) -> dict:
         # Trích text thuần từ segments (bỏ timestamp), cap ~6000 chars
         parts = [s.get("text", "").strip() for s in segments if s.get("text", "").strip()]
         text_sample = " ".join(parts)
+        t_transcribe = time.perf_counter()
 
         meta = generate_document_metadata(
             text_sample=text_sample,
             filename=file.filename,
+        )
+        t_ai = time.perf_counter()
+
+        logger.info(
+            "POST /api/ingest/video/file/preview steps (%s): upload=%.3fs transcribe=%.3fs ai_meta=%.3fs total=%.3fs (segments=%d, sample=%d chars)",
+            file.filename,
+            t_upload - t0, t_transcribe - t_upload,
+            t_ai - t_transcribe, t_ai - t0,
+            len(segments), len(text_sample),
         )
 
         if meta is None:
@@ -319,6 +391,10 @@ async def preview_video_metadata(file: UploadFile = File(...)) -> dict:
         }
     except Exception as exc:
         logger.exception("Preview video metadata error for %s: %s", file.filename, exc)
+        logger.info(
+            "POST /api/ingest/video/file/preview FAILED (%s): upload=%.3fs total=%.3fs",
+            file.filename, t_upload - t0, time.perf_counter() - t0,
+        )
         return {
             "status": "error",
             "message": f"Lỗi: {exc}",
@@ -350,6 +426,7 @@ async def ingest_youtube(
     description: str = Form(default=""),
     tags: str = Form(default=""),
 ) -> IngestResponse:
+    t0 = time.perf_counter()
     if not url or not url.strip():
         return IngestResponse(
             status="error",
@@ -367,12 +444,18 @@ async def ingest_youtube(
             # Playlist: chỉ truyền domain (tags/title/description per-video khác nhau)
             pl_meta = {"domain": meta["domain"]} if meta.get("domain") else None
             data = _ingest_pl(playlist_url=clean_url, metadata=pl_meta)
+            t_done = time.perf_counter()
             results = data["results"]
             playlist_info = data.get("playlist_info") or {}
             total_ok = sum(1 for r in results if r["status"] == "ok")
             total_chunks = sum(r["chunks_added"] for r in results)
             failed = [r for r in results if r["status"] == "error"]
             pl_title = playlist_info.get("playlist_title") or "playlist"
+            logger.info(
+                "POST /api/ingest/youtube (playlist) steps (%s): fetch+ingest_all=%.3fs total=%.3fs (videos=%d, ok=%d, chunks=%d)",
+                clean_url, t_done - t0, t_done - t0,
+                len(results), total_ok, total_chunks,
+            )
             msg = (
                 f"Playlist '{pl_title}': {total_ok}/{len(results)} video thành công, "
                 f"tổng {total_chunks} đoạn."
@@ -386,6 +469,10 @@ async def ingest_youtube(
             )
         except Exception as exc:
             logger.exception("Playlist ingest error for %s: %s", clean_url, exc)
+            logger.info(
+                "POST /api/ingest/youtube (playlist) FAILED (%s): total=%.3fs",
+                clean_url, time.perf_counter() - t0,
+            )
             return IngestResponse(
                 status="error",
                 chunks_added=0,
@@ -395,12 +482,21 @@ async def ingest_youtube(
     try:
         from app.ingestion.video_pipeline import ingest_youtube as _ingest_yt
         result = _ingest_yt(url=clean_url, metadata=meta if meta else None)
+        t_done = time.perf_counter()
+        logger.info(
+            "POST /api/ingest/youtube steps (%s): fetch+transcribe+embed=%.3fs total=%.3fs (chunks=%d)",
+            clean_url, t_done - t0, t_done - t0, result.num_chunks,
+        )
         return IngestResponse(
             status="ok",
             chunks_added=result.num_chunks,
             message=f"Nạp thành công '{result.source_name}': {result.num_chunks} đoạn.",
         )
     except ValueError as exc:
+        logger.info(
+            "POST /api/ingest/youtube invalid URL (%s): total=%.3fs",
+            clean_url, time.perf_counter() - t0,
+        )
         return IngestResponse(
             status="error",
             chunks_added=0,
@@ -408,6 +504,10 @@ async def ingest_youtube(
         )
     except Exception as exc:
         logger.exception("YouTube ingest error for %s: %s", clean_url, exc)
+        logger.info(
+            "POST /api/ingest/youtube FAILED (%s): total=%.3fs",
+            clean_url, time.perf_counter() - t0,
+        )
         return IngestResponse(
             status="error",
             chunks_added=0,
@@ -424,6 +524,7 @@ async def preview_youtube_metadata(url: str) -> dict:
 
     Playlist URL → trả status=skip (playlist không preview được từng video).
     """
+    t0 = time.perf_counter()
     if not url or not url.strip():
         return {"status": "error", "message": "Vui lòng nhập URL.", "metadata": None}
 
@@ -434,11 +535,19 @@ async def preview_youtube_metadata(url: str) -> dict:
             info = fetch_playlist_info(clean_url)
         except Exception as exc:
             logger.warning("Playlist preview fail cho %s: %s", clean_url, exc)
+            logger.info(
+                "POST /api/ingest/youtube/preview (playlist) FAILED (%s): total=%.3fs",
+                clean_url, time.perf_counter() - t0,
+            )
             return {
                 "status": "error",
                 "message": f"Không lấy được metadata playlist: {exc}",
                 "metadata": None,
             }
+        logger.info(
+            "POST /api/ingest/youtube/preview (playlist) steps (%s): fetch_info=%.3fs total=%.3fs",
+            clean_url, time.perf_counter() - t0, time.perf_counter() - t0,
+        )
         return {
             "status": "ok",
             "message": (
@@ -469,20 +578,28 @@ async def preview_youtube_metadata(url: str) -> dict:
         yt = fetch_youtube_metadata(clean_url)
     except Exception as exc:
         logger.warning("yt-dlp metadata fail cho %s: %s", clean_url, exc)
+        logger.info(
+            "POST /api/ingest/youtube/preview FAILED (%s) at ytdlp: total=%.3fs",
+            clean_url, time.perf_counter() - t0,
+        )
         return {
             "status": "error",
             "message": f"Không lấy được metadata YouTube: {exc}",
             "metadata": None,
         }
+    t_ytdlp = time.perf_counter()
 
     # 2) Transcript (best-effort — có thể fail do IP block / video không có transcript)
     transcript_text = ""
+    transcript_ok = False
     try:
         data = fetch_youtube_transcript(clean_url)
         parts = [s.get("text", "").strip() for s in data.get("segments", []) if s.get("text")]
         transcript_text = " ".join(parts)
+        transcript_ok = bool(transcript_text)
     except Exception as exc:
         logger.info("Không lấy được transcript cho AI classify: %s", type(exc).__name__)
+    t_transcript = time.perf_counter()
 
     # 3) AI classify domain + tags (dùng title + description + transcript làm input)
     ai_parts: list[str] = []
@@ -497,6 +614,15 @@ async def preview_youtube_metadata(url: str) -> dict:
     ai_meta = generate_document_metadata(
         text_sample=ai_input,
         filename=yt.get("title") or "youtube-video",
+    )
+    t_ai = time.perf_counter()
+    logger.info(
+        "POST /api/ingest/youtube/preview steps (%s): ytdlp=%.3fs transcript=%.3fs%s ai_classify=%.3fs total=%.3fs (ai_ok=%s)",
+        clean_url,
+        t_ytdlp - t0,
+        t_transcript - t_ytdlp, "" if transcript_ok else " [no-transcript]",
+        t_ai - t_transcript, t_ai - t0,
+        ai_meta is not None,
     )
 
     # 4) Gộp: title/description từ YouTube, domain/tags từ AI
@@ -533,17 +659,24 @@ async def preview_youtube_metadata(url: str) -> dict:
 
 @router.post("/youtube-playlist")
 async def ingest_youtube_playlist(url: str) -> dict:
+    t0 = time.perf_counter()
     if not url or not url.strip():
         return {"status": "error", "message": "Vui lòng nhập URL playlist.", "results": []}
 
     try:
         from app.ingestion.video_pipeline import ingest_youtube_playlist as _ingest_pl
         data = _ingest_pl(playlist_url=url.strip())
+        t_done = time.perf_counter()
         results = data["results"]
         playlist_info = data.get("playlist_info") or {}
         total_ok = sum(1 for r in results if r["status"] == "ok")
         total_chunks = sum(r["chunks_added"] for r in results)
         pl_title = playlist_info.get("playlist_title") or "playlist"
+        logger.info(
+            "POST /api/ingest/youtube-playlist steps (%s): fetch+ingest_all=%.3fs total=%.3fs (videos=%d, ok=%d, chunks=%d)",
+            url.strip(), t_done - t0, t_done - t0,
+            len(results), total_ok, total_chunks,
+        )
         return {
             "status": "ok",
             "message": (
@@ -557,7 +690,15 @@ async def ingest_youtube_playlist(url: str) -> dict:
             "results": results,
         }
     except RuntimeError as exc:
+        logger.info(
+            "POST /api/ingest/youtube-playlist FAILED (%s): total=%.3fs",
+            url, time.perf_counter() - t0,
+        )
         return {"status": "error", "message": f"Lỗi playlist: {exc}", "results": []}
     except Exception as exc:
         logger.exception("Playlist ingest error for %s: %s", url, exc)
+        logger.info(
+            "POST /api/ingest/youtube-playlist FAILED (%s): total=%.3fs",
+            url, time.perf_counter() - t0,
+        )
         return {"status": "error", "message": f"Lỗi khi nạp playlist: {exc}", "results": []}
