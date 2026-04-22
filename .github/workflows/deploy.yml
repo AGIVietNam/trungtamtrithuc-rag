@@ -1,0 +1,62 @@
+name: Trung Tam Tri Thuc Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - stage
+      - development
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check branch and set config
+        id: branch-check
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "ssh_host=${{ secrets.SSH_HOST }}" >> "$GITHUB_OUTPUT"
+            echo "ssh_port=${{ secrets.SSH_PORT }}" >> "$GITHUB_OUTPUT"
+            echo "ssh_user=${{ secrets.SSH_USER }}" >> "$GITHUB_OUTPUT"
+            echo "project_path=~/projects/trungtamtrithuc-rag" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref_name }}" = "stage" ]; then
+            echo "ssh_host=${{ secrets.SSH_STAGE_HOST }}" >> "$GITHUB_OUTPUT"
+            echo "ssh_port=${{ secrets.SSH_STAGE_PORT }}" >> "$GITHUB_OUTPUT"
+            echo "ssh_user=${{ secrets.SSH_USER }}" >> "$GITHUB_OUTPUT"
+            echo "project_path=~/projects/trungtamtrithuc-rag" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref_name }}" = "development" ]; then
+            echo "ssh_host=${{ secrets.SSH_DEV_HOST }}" >> "$GITHUB_OUTPUT"
+            echo "ssh_port=${{ secrets.SSH_DEV_PORT }}" >> "$GITHUB_OUTPUT"
+            echo "ssh_user=${{ secrets.SSH_USER_DEV_SERVER }}" >> "$GITHUB_OUTPUT"
+            echo "project_path=~/trungtamtrithuc-rag" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unknown branch: ${{ github.ref_name }}"
+            exit 1
+          fi
+
+      - name: Set up SSH key
+        run: |
+          echo "${{ secrets.SSH_KEY }}" > key.pem
+          chmod 400 key.pem
+
+      - name: Deploy application
+        env:
+          SSH_HOST: ${{ steps.branch-check.outputs.ssh_host }}
+          SSH_PORT: ${{ steps.branch-check.outputs.ssh_port }}
+          SSH_USER: ${{ steps.branch-check.outputs.ssh_user }}
+          PROJECT_PATH: ${{ steps.branch-check.outputs.project_path }}
+          DEPLOY_BRANCH: ${{ github.ref_name }}
+        run: |
+          echo "[DEPLOY] Running deploy script on ${{ github.ref_name }}..."
+          ssh -o StrictHostKeyChecking=no -i key.pem -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" << EOF
+            PROJECT_PATH_RAW="${PROJECT_PATH}"
+            PROJECT_PATH_RESOLVED="\${PROJECT_PATH_RAW/#\~/\$HOME}"
+            cd "\$PROJECT_PATH_RESOLVED"
+            pwd && ls -la
+            export DEPLOY_BRANCH="${DEPLOY_BRANCH}"
+            bash bin/release.sh
+          EOF
+          echo "Deployment completed on ${{ github.ref_name }}"
