@@ -250,7 +250,7 @@ class RAGChain:
             "yes" if do_recall else "skipped", len(hits),
         )
         return {
-            "answer": clean_answer,
+            "answer": answer_text,
             "sources": source_mapping if has_sources else [],
             "confidence": _confidence(top_score),
             "suggested_questions": suggested_questions,
@@ -368,7 +368,7 @@ class RAGChain:
 
         yield {
             "type": "done",
-            "answer": clean_answer,
+            "answer": full_text,
             "sources": source_mapping if has_sources else [],
             "suggested_questions": suggested_questions,
         }
