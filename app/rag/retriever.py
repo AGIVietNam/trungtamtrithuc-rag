@@ -44,7 +44,7 @@ class Retriever:
         col = getattr(store, "collection", "vmedia")
         try:
             hits = store.search(query_vec, limit=top_k, filter=qdrant_filter)
-            logger.debug(
+            logger.info(
                 "retriever _search_one %s/%s: %d hits (filter=%s)",
                 col, source_type, len(hits),
                 bool(qdrant_filter),
