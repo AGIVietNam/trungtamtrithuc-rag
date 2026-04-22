@@ -9,7 +9,7 @@ main() {
   echo "[INFO] Deploy branch: ${DEPLOY_BRANCH}"
   git fetch origin "${DEPLOY_BRANCH}"
   git checkout "${DEPLOY_BRANCH}"
-  git pull origin "${DEPLOY_BRANCH}"
+  git reset --hard "origin/${DEPLOY_BRANCH}"
 
   # Source runtime env before install/start commands.
   # shellcheck disable=SC1091
