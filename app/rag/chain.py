@@ -372,14 +372,9 @@ class RAGChain:
         clean_answer, suggested_questions = _extract_suggestions(full_text)
         has_sources = "Nguồn:" in clean_answer or "nguồn:" in clean_answer.lower()
 
-        final_output = full_text
-        # Only append if we HAVE questions but they WEREN'T found (stripped) from the text
-        if suggested_questions and len(clean_answer) >= len(full_text):
-            final_output += "\n\n--- GỢI Ý ---\n" + "\n".join([f"{i+1}. {q}" for i, q in enumerate(suggested_questions)])
-
         yield {
             "type": "done",
-            "answer": final_output,
+            "answer": full_text,
             "sources": source_mapping if has_sources else [],
             "suggested_questions": suggested_questions,
         }
