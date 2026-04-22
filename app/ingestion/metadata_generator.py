@@ -1,7 +1,7 @@
 """AI auto-generate document metadata (title, description, domain, tags).
 
 Dùng Anthropic Claude Haiku 4.5 + tool use để ép LLM trả output đúng schema:
-- Controlled vocabulary cho `domain` (7 label cố định) → không hallucinate.
+- Controlled vocabulary cho `domain` (12 label khớp DOMAIN_PERSONAS) → không hallucinate.
 - Pydantic validate sau khi nhận tool_use.input.
 - Fallback an toàn: nếu LLM fail hoặc input thiếu ngữ cảnh → trả None.
 
@@ -13,21 +13,39 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, Field, ValidationError
 
 from app.config import ANTHROPIC_API_KEY, CLAUDE_HAIKU_MODEL
+from app.rag.prompt_builder import DOMAIN_KEYS as _PERSONA_DOMAINS
 
 logger = logging.getLogger(__name__)
 
+# Giữ Literal ở dạng literal strings (Pydantic/type checker không đọc được
+# Literal[*tuple]), rồi assert với DOMAIN_PERSONAS để bắt drift sớm lúc import.
 DomainLiteral = Literal[
-    "bim", "mep", "kết cấu", "marketing", "pháp lý", "sản xuất", "mặc định"
+    "bim",
+    "mep",
+    "kết cấu",
+    "marketing",
+    "pháp lý",
+    "sản xuất",
+    "công nghệ thông tin",
+    "nhân sự",
+    "tài chính",
+    "kinh doanh",
+    "thiết kế",
+    "mặc định",
 ]
 
-DOMAIN_VALUES: list[str] = [
-    "bim", "mep", "kết cấu", "marketing", "pháp lý", "sản xuất", "mặc định"
-]
+DOMAIN_VALUES: list[str] = list(get_args(DomainLiteral))
+
+# Guard drift: nếu ai đổi DOMAIN_PERSONAS mà quên cập nhật ở đây, build fail sớm.
+assert set(DOMAIN_VALUES) == set(_PERSONA_DOMAINS), (
+    "Domain drift giữa metadata_generator và prompt_builder.DOMAIN_PERSONAS: "
+    f"symmetric_diff={set(DOMAIN_VALUES) ^ set(_PERSONA_DOMAINS)}"
+)
 
 MIN_TEXT_LEN = 200       # dưới ngưỡng này input không đủ ngữ cảnh, skip LLM
 MAX_SAMPLE_CHARS = 6000  # ~3000 token tiếng Việt
@@ -69,7 +87,7 @@ _TOOL_DEF: dict[str, Any] = {
             "domain": {
                 "type": "string",
                 "enum": DOMAIN_VALUES,
-                "description": "Đúng 1 trong 7 domain cố định",
+                "description": "Đúng 1 trong 12 domain cố định, khớp DOMAIN_PERSONAS",
             },
             "tags": {
                 "type": "array",
@@ -88,13 +106,18 @@ _SYSTEM_PROMPT = """Bạn là trợ lý phân loại tài liệu kỹ thuật ti
 Nhiệm vụ: Đọc trích đoạn tài liệu và GỌI tool save_document_metadata với 4 field.
 
 <domain_guide>
-Chọn ĐÚNG 1 domain từ danh sách:
+Chọn ĐÚNG 1 domain từ danh sách (phải khớp giá trị, lowercase, có dấu tiếng Việt):
 - bim: BIM, IFC, Revit, LOD, clash detection, mô hình 3D công trình
 - mep: điện, cơ, nước, HVAC, PCCC, sprinkler, ELV, BMS
 - kết cấu: bê tông, thép, móng, tải trọng, FEM, kết cấu công trình
-- marketing: truyền thông, thương hiệu, campaign, content, funnel, KPI
-- pháp lý: hợp đồng, nghị định, thông tư, luật xây dựng/doanh nghiệp
-- sản xuất: thi công, an toàn lao động, tiến độ, Lean, 5S, OEE
+- thiết kế: kiến trúc, quy hoạch, nội thất, concept/schematic design, AutoCAD/Revit/SketchUp, material board
+- marketing: truyền thông, thương hiệu, campaign, content, funnel, conversion, KPI marketing
+- kinh doanh: pipeline bán hàng, KAM, hoa hồng, sales forecast, hợp đồng khung, closing rate
+- sản xuất: thi công, an toàn lao động, tiến độ, Lean, 5S, Kaizen, OEE, SOP, BOM
+- pháp lý: hợp đồng, nghị định, thông tư, Luật Xây dựng/Đầu tư/Doanh nghiệp/Lao động, Điều-Khoản-Điểm
+- tài chính: BCTC, dòng tiền, NPV/IRR, ROI, ngân sách, thuế TNDN/GTGT, VAS/IFRS, EBITDA
+- nhân sự: tuyển dụng, C&B, OKR/KPI, đào tạo, onboarding, Bộ luật Lao động, BHXH/BHYT/BHTN
+- công nghệ thông tin: hạ tầng mạng, cloud AWS/Azure/GCP, bảo mật ISO 27001, ERP/CRM, DevOps, VPN, SSO
 - mặc định: không khớp rõ với bất kỳ nhóm nào ở trên
 </domain_guide>
 

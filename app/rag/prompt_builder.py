@@ -207,6 +207,12 @@ DOMAIN_PERSONAS: dict[str, str] = {
 }
 
 
+# Nguồn chân lý cho tập domain cả hệ thống (chat persona + metadata classifier).
+# metadata_generator import DOMAIN_KEYS này và assert cùng tập khi module load,
+# để khi thêm/bớt persona ở đây, classifier không silently drift.
+DOMAIN_KEYS: tuple[str, ...] = tuple(DOMAIN_PERSONAS.keys())
+
+
 # ---------------------------------------------------------------- base rules
 # Rules ổn định cross-turn, đặt trong system prompt + cache_control ephemeral.
 # Opus 4.7 literal-instruction-following → rules rõ ràng, tránh mâu thuẫn; mọi
