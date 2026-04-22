@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import re
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -17,6 +19,8 @@ from app.rag.prompt_builder import (
     build_conversation_block,
     build_user_turn,
 )
+
+logger = logging.getLogger(__name__)
 
 _SUGGESTION_PATTERN = re.compile(
     r"\n*---GỢI Ý---\s*\n(.*)",
@@ -95,26 +99,45 @@ class RAGChain:
         conv_memory: ConversationMemory | None = None,
     ) -> dict[str, Any]:
         history = history or []
+        t0 = time.perf_counter()
 
-        # --- 1. Query rewrite (Haiku) để xử lý đại từ/zero anaphora tiếng Việt
+        # --- 1. Query rewrite (Haiku) — anaphora-conditional, skip nếu query
+        # tự đứng được (xem conv_query_rewriter._has_anaphora). Cắt 1-3s/turn.
         search_query = query
         if conv_memory is not None and user_id and history:
             try:
                 search_query = rewrite_query(self.claude, query, history)
             except Exception:
                 search_query = query
+        t_rewrite = time.perf_counter()
 
-        # --- 2. Parallel: document retrieval + conversation recall
+        # --- 2. Embed query 1 LẦN, reuse cho cả retriever + conv_memory.
+        # Trước fix này, mỗi turn gọi Voyage 2 lần cho cùng 1 query → góp phần
+        # đẩy free-tier 3 RPM vào 429 → backoff 25s × N retry.
+        query_vec = self.retriever.voyage.embed_query(search_query)
+        t_embed = time.perf_counter()
+
+        # --- 3. Parallel: document retrieval + conversation recall
+        # Recall gating: skip Qdrant call cho greeting/yes-no — sẽ chỉ recall
+        # ra pair noise lạc đề và tốn 1 round-trip Qdrant.
         recall_pairs: list[dict] = []
+        do_recall = (
+            conv_memory is not None
+            and bool(user_id)
+            and not ConversationMemory.should_skip_recall(search_query)
+        )
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             f_docs = ex.submit(
                 self.retriever.retrieve,
                 search_query, self.top_k, sources_filter, expert_domain,
+                query_vec=query_vec,
             )
             f_conv = None
-            if conv_memory is not None and user_id:
+            if do_recall:
                 f_conv = ex.submit(
-                    conv_memory.retrieve, user_id, search_query, session_id,
+                    conv_memory.retrieve,
+                    user_id, search_query, session_id,
+                    query_vec=query_vec,
                 )
             hits = f_docs.result()
             if f_conv is not None:
@@ -122,12 +145,21 @@ class RAGChain:
                     recall_pairs = f_conv.result()
                 except Exception:
                     recall_pairs = []
+        t_retrieve = time.perf_counter()
 
         hits = self.reranker.rerank(search_query, hits, top_k=self.rerank_top_k)
+        t_rerank = time.perf_counter()
 
-        # --- 2b. Guard: không đủ context → refuse cứng, KHÔNG gọi Claude
+        # --- 3b. Guard: không đủ context → refuse cứng, KHÔNG gọi Claude
         # (tránh hallucinate từ training data).
         if _should_refuse(hits):
+            logger.info(
+                "RAG refused: rewrite=%.2fs embed=%.2fs retrieve=%.2fs "
+                "rerank=%.2fs total=%.2fs (recall=%s)",
+                t_rewrite - t0, t_embed - t_rewrite, t_retrieve - t_embed,
+                t_rerank - t_retrieve, t_rerank - t0,
+                "yes" if do_recall else "skipped",
+            )
             return {
                 "answer": _REFUSAL_TEMPLATE,
                 "sources": [],
@@ -138,7 +170,7 @@ class RAGChain:
                 "refused": True,
             }
 
-        # --- 3. Build prompt:
+        # --- 4. Build prompt:
         # - system: persona + _BASE_RULES (STABLE → cache hit mọi turn sau lượt đầu)
         # - user turn cuối: <retrieved_documents> + <user_context>/<session_summary>
         #   + task reminder + query gốc (docs ở top, query ở bottom — long-context tip).
@@ -154,11 +186,19 @@ class RAGChain:
             system_prompt=system_prompt,
             messages=messages,
         )
+        t_claude = time.perf_counter()
 
         clean_answer, suggested_questions = _extract_suggestions(answer_text)
         has_sources = "Nguồn:" in clean_answer or "nguồn:" in clean_answer.lower()
 
         top_score = hits[0].score if hits else 0.0
+        logger.info(
+            "RAG done: rewrite=%.2fs embed=%.2fs retrieve=%.2fs rerank=%.2fs "
+            "claude=%.2fs total=%.2fs (recall=%s, hits=%d)",
+            t_rewrite - t0, t_embed - t_rewrite, t_retrieve - t_embed,
+            t_rerank - t_retrieve, t_claude - t_rerank, t_claude - t0,
+            "yes" if do_recall else "skipped", len(hits),
+        )
         return {
             "answer": clean_answer,
             "sources": source_mapping if has_sources else [],
@@ -180,6 +220,7 @@ class RAGChain:
         conv_memory: ConversationMemory | None = None,
     ) -> Iterator[dict[str, Any]]:
         history = history or []
+        t0 = time.perf_counter()
 
         search_query = query
         if conv_memory is not None and user_id and history:
@@ -187,17 +228,30 @@ class RAGChain:
                 search_query = rewrite_query(self.claude, query, history)
             except Exception:
                 search_query = query
+        t_rewrite = time.perf_counter()
+
+        # Embed query 1 lần, reuse cho retriever + conv_memory.
+        query_vec = self.retriever.voyage.embed_query(search_query)
+        t_embed = time.perf_counter()
 
         recall_pairs: list[dict] = []
+        do_recall = (
+            conv_memory is not None
+            and bool(user_id)
+            and not ConversationMemory.should_skip_recall(search_query)
+        )
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             f_docs = ex.submit(
                 self.retriever.retrieve,
                 search_query, self.top_k, sources_filter, expert_domain,
+                query_vec=query_vec,
             )
             f_conv = None
-            if conv_memory is not None and user_id:
+            if do_recall:
                 f_conv = ex.submit(
-                    conv_memory.retrieve, user_id, search_query, session_id,
+                    conv_memory.retrieve,
+                    user_id, search_query, session_id,
+                    query_vec=query_vec,
                 )
             hits = f_docs.result()
             if f_conv is not None:
@@ -205,8 +259,17 @@ class RAGChain:
                     recall_pairs = f_conv.result()
                 except Exception:
                     recall_pairs = []
+        t_retrieve = time.perf_counter()
 
         hits = self.reranker.rerank(search_query, hits, top_k=self.rerank_top_k)
+        t_rerank = time.perf_counter()
+        logger.info(
+            "RAG stream pre-llm: rewrite=%.2fs embed=%.2fs retrieve=%.2fs "
+            "rerank=%.2fs total=%.2fs (recall=%s, hits=%d)",
+            t_rewrite - t0, t_embed - t_rewrite, t_retrieve - t_embed,
+            t_rerank - t_retrieve, t_rerank - t0,
+            "yes" if do_recall else "skipped", len(hits),
+        )
 
         # Guard: không đủ context → emit refusal events và dừng, không gọi Claude.
         if _should_refuse(hits):

@@ -10,11 +10,34 @@ Nếu query đã dài/đầy đủ → không rewrite (tiết kiệm).
 from __future__ import annotations
 
 import logging
+import re
 
 from app.core.claude_client import ClaudeClient
 from app.config import CLAUDE_HAIKU_MODEL, CONV_REWRITE_MIN_LEN
 
 logger = logging.getLogger(__name__)
+
+# Anaphora / zero-anaphora markers tiếng Việt — query chứa các từ này thường
+# cần resolve về danh từ cụ thể từ context. Query KHÔNG có markers + đủ thông
+# tin nội dung thì tự đứng được → skip Haiku call (~1-3s save mỗi turn 2+).
+# Microsoft RAG production guide khuyến nghị conditional rewrite: 50-70% turn
+# có thể bỏ qua bước này.
+_ANAPHORA_MARKERS = re.compile(
+    r"(?:^|\W)("
+    r"nó|hắn|họ|chúng|"
+    r"cái\s+(?:đó|này|ấy|kia)|"
+    r"vụ\s+(?:đó|này|ấy|kia)|"
+    r"chỗ\s+(?:đó|này|ấy|kia)|"
+    r"điều\s+(?:đó|này|ấy)|"
+    r"(?:cô|anh|chị|ông|bà)\s+ấy|"
+    r"vậy|thế|đó|đấy|ấy"
+    r")(?:\W|$)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _has_anaphora(text: str) -> bool:
+    return bool(_ANAPHORA_MARKERS.search(text))
 
 _SYSTEM_PROMPT = (
     "Bạn là module rewrite câu hỏi tiếng Việt thành câu đầy đủ (standalone).\n\n"
@@ -59,6 +82,12 @@ def rewrite(
 
     # Query đã đủ dài → có khả năng đã tự chứa đủ ngữ cảnh
     if len(query) >= CONV_REWRITE_MIN_LEN:
+        return query
+
+    # Conditional rewrite: chỉ gọi Haiku khi query có dấu hiệu anaphora.
+    # Câu ngắn nhưng đã đầy đủ chủ ngữ (vd "Doanh thu Q1 bao nhiêu?")
+    # đứng độc lập được — embed thẳng, save 1 round-trip Haiku ~1-3s.
+    if not _has_anaphora(query):
         return query
 
     try:

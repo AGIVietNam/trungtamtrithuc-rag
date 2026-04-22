@@ -24,6 +24,15 @@ async def _lifespan(app: FastAPI):
         except Exception:
             logger.exception("Reranker warmup failed")
 
+        # Tạo payload index cho ttt_memory (idempotent). Trước fix này, mọi
+        # filter user_id/session_id trên ttt_memory đều fail 400, khiến
+        # tier-3 vector recall + semantic dedup chưa từng chạy đúng.
+        try:
+            from app.api.chat import _get_conv_memory
+            _get_conv_memory().ensure_indexes()
+        except Exception:
+            logger.exception("conv_memory ensure_indexes failed")
+
     # Chạy trong thread riêng để không block event loop (model load CPU-bound).
     try:
         await asyncio.to_thread(_warmup)

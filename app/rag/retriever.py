@@ -60,11 +60,17 @@ class Retriever:
         top_k: int = 10,
         sources: list[str] | None = None,
         domain_filter: str | None = None,
+        query_vec: list[float] | None = None,
     ) -> list[Hit]:
+        """``query_vec``: nếu caller đã embed query rồi (vd chain.py muốn
+        reuse cho cả retriever + conv_memory.retrieve) thì truyền vào để
+        khỏi embed lại — tiết kiệm 1 Voyage call/turn.
+        """
         if sources is None:
             sources = ["documents", "videos"]
 
-        query_vec = self.voyage.embed_query(query)
+        if query_vec is None:
+            query_vec = self.voyage.embed_query(query)
 
         # Build Qdrant filter for domain if specified
         qdrant_filter = None

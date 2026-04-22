@@ -213,6 +213,47 @@ class ConversationMemory:
             raise RuntimeError("ConversationMemory: embedder chưa được inject")
         return self.embedder.embed_query(text)
 
+    # -------------------------------------------------------------- bootstrap
+    def ensure_indexes(self) -> None:
+        """Tạo payload index cho user_id + session_id (idempotent).
+
+        Qdrant yêu cầu payload index để filter exact match. Khi chưa có index,
+        mọi search có `filter.must.user_id` đều fail 400 — bị nuốt im lặng bởi
+        try/except ở `retrieve()` và `_find_near_duplicate()`. Hệ quả: tier-3
+        vector recall và semantic dedup chưa từng chạy đúng. Gọi 1 lần lúc
+        startup là đủ — Qdrant trả 200 idempotent nếu index đã tồn tại.
+        """
+        for field in ("user_id", "session_id"):
+            try:
+                self._req(
+                    "PUT",
+                    f"/collections/{self.collection}/index?wait=true",
+                    {"field_name": field, "field_schema": "keyword"},
+                )
+                logger.info("conv_memory ensured payload index: %s", field)
+            except Exception as exc:
+                # Không raise — collection có thể chưa tồn tại lần startup đầu
+                # (chưa có pair nào upsert). Lần sau pair đầu tiên sẽ tạo
+                # collection, lần restart kế tiếp sẽ tạo index thành công.
+                logger.warning(
+                    "conv_memory ensure_indexes(%s) skipped: %s", field, exc
+                )
+
+    @staticmethod
+    def should_skip_recall(query: str) -> bool:
+        """True nếu query không đáng tốn 1 Qdrant call để recall.
+
+        Reuse `_SKIP_PATTERNS` (greeting/ack/yes-no) đã dùng cho upsert filter.
+        Câu chào / "ok" / "cảm ơn" → recall ra pair lạc đề chỉ làm noise prompt.
+        """
+        q = (query or "").strip()
+        if len(q) < 6:
+            return True
+        for pat in _SKIP_PATTERNS:
+            if pat.match(q):
+                return True
+        return False
+
     # ------------------------------------------------------------------ upsert
 
     def upsert_pair(
@@ -312,10 +353,15 @@ class ConversationMemory:
         current_session_id: str | None = None,
         top_k: int | None = None,
         score_threshold: float | None = None,
+        query_vec: list[float] | None = None,
     ) -> list[dict]:
         """Vector search trong scope user_id. Trả về list payload đã sort.
 
         Luôn thành công ngay cả khi Qdrant lỗi (trả [] ).
+
+        ``query_vec`` (optional): nếu caller đã embed query rồi (vd chain.py
+        embed 1 lần dùng cho cả retriever + recall) thì truyền vào để khỏi
+        embed lại — tiết kiệm 1 Voyage call/turn.
         """
         if not user_id or not query:
             return []
@@ -324,7 +370,7 @@ class ConversationMemory:
         threshold = score_threshold if score_threshold is not None else CONV_RECALL_MIN_SCORE
 
         try:
-            vec = self._embed(query)
+            vec = query_vec if query_vec is not None else self._embed(query)
 
             must: list[dict] = [
                 {"key": "user_id", "match": {"value": user_id}},
