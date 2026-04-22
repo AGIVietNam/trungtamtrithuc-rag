@@ -10,7 +10,6 @@ from fastapi import APIRouter, File, Form, UploadFile
 from app.schemas import IngestResponse
 from app.ingestion.doc_pipeline import ingest_document, ensure_collections
 from app.ingestion.metadata_generator import generate_document_metadata
-from app.core import s3_client
 
 logger = logging.getLogger(__name__)
 
@@ -71,21 +70,6 @@ async def ingest_file(
     if url.strip():
         meta["url"] = url.strip()
 
-    # Upload file gốc lên S3 → user click link tải về xem bản gốc
-    # Cấu trúc: docs/<domain-slug>/<sha256>.<ext>
-    s3_done = False
-    if s3_client.is_configured():
-        try:
-            prefix = f"{s3_client.PREFIX_DOCS}/{s3_client.slugify_domain(domain)}"
-            s3_url = s3_client.upload_file(
-                tmp_path, prefix=prefix,
-                original_name=file.filename,
-            )
-            meta["url"] = s3_url  # override: S3 là source of truth cho file đã upload
-            s3_done = True
-        except Exception:
-            logger.warning("S3 upload failed for %s — ingest continues without source_url", file.filename, exc_info=True)
-    t_s3 = time.perf_counter()
 
     try:
         result = ingest_document(
@@ -95,11 +79,10 @@ async def ingest_file(
         )
         t_ingest = time.perf_counter()
         logger.info(
-            "POST /api/ingest/file steps (%s): upload=%.3fs s3=%.3fs%s ingest=%.3fs total=%.3fs (chunks=%d, pages=%d)",
+            "POST /api/ingest/file steps (%s): upload=%.3fs ingest=%.3fs total=%.3fs (chunks=%d, pages=%d)",
             file.filename,
             t_upload - t0,
-            t_s3 - t_upload, "" if s3_done else " [skip]",
-            t_ingest - t_s3,
+            t_ingest - t_upload,
             t_ingest - t0,
             result.num_chunks, result.num_pages,
         )
@@ -111,10 +94,10 @@ async def ingest_file(
     except Exception as exc:
         logger.exception("Ingest error for %s: %s", file.filename, exc)
         logger.info(
-            "POST /api/ingest/file FAILED (%s): upload=%.3fs s3=%.3fs ingest=%.3fs total=%.3fs",
+            "POST /api/ingest/file FAILED (%s): upload=%.3fs ingest=%.3fs total=%.3fs",
             file.filename,
-            t_upload - t0, t_s3 - t_upload,
-            time.perf_counter() - t_s3,
+            t_upload - t0,
+            time.perf_counter() - t_upload,
             time.perf_counter() - t0,
         )
         return IngestResponse(
@@ -265,21 +248,6 @@ async def ingest_video_file(
 
     meta = _build_metadata_dict(title, domain, description, tags, url)
 
-    # Upload video gốc lên S3 → user click link phát trực tiếp (ACL public-read)
-    # Cấu trúc: videos/<domain-slug>/<sha256>.<ext>
-    s3_done = False
-    if s3_client.is_configured():
-        try:
-            prefix = f"{s3_client.PREFIX_VIDEOS}/{s3_client.slugify_domain(domain)}"
-            s3_url = s3_client.upload_file(
-                tmp_path, prefix=prefix,
-                original_name=file.filename,
-            )
-            meta["url"] = s3_url
-            s3_done = True
-        except Exception:
-            logger.warning("S3 upload failed for %s — ingest continues without source_url", file.filename, exc_info=True)
-    t_s3 = time.perf_counter()
 
     try:
         from app.ingestion.video_pipeline import ingest_video_file as _ingest_video
@@ -290,11 +258,10 @@ async def ingest_video_file(
         )
         t_ingest = time.perf_counter()
         logger.info(
-            "POST /api/ingest/video/file steps (%s): upload=%.3fs s3=%.3fs%s transcribe+embed=%.3fs total=%.3fs (chunks=%d)",
+            "POST /api/ingest/video/file steps (%s): upload=%.3fs transcribe+embed=%.3fs total=%.3fs (chunks=%d)",
             file.filename,
             t_upload - t0,
-            t_s3 - t_upload, "" if s3_done else " [skip]",
-            t_ingest - t_s3,
+            t_ingest - t_upload,
             t_ingest - t0,
             result.num_chunks,
         )
@@ -313,10 +280,10 @@ async def ingest_video_file(
     except Exception as exc:
         logger.exception("Video ingest error for %s: %s", file.filename, exc)
         logger.info(
-            "POST /api/ingest/video/file FAILED (%s): upload=%.3fs s3=%.3fs transcribe=%.3fs total=%.3fs",
+            "POST /api/ingest/video/file FAILED (%s): upload=%.3fs transcribe=%.3fs total=%.3fs",
             file.filename,
-            t_upload - t0, t_s3 - t_upload,
-            time.perf_counter() - t_s3,
+            t_upload - t0,
+            time.perf_counter() - t_upload,
             time.perf_counter() - t0,
         )
         return IngestResponse(

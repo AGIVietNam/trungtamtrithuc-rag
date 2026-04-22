@@ -105,21 +105,6 @@ cp .env.example .env            # điền API keys (xem bảng bên dưới)
 | `RERANKER_DEVICE` | auto | Ép device cho cross-encoder: `cpu`/`cuda`/`mps`. Mặc định auto-detect (CUDA > MPS > CPU). |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | |
 
-### Storage (S3-compatible) — tuỳ chọn
-
-Dùng cho ingest file/video: upload file gốc lên S3 → `payload.url` trong Qdrant là public URL → chat trả về link click tải file / nhảy đúng trang PDF. Thiếu các biến này thì ingest vẫn chạy, chỉ không có link gốc.
-
-| Biến | Mô tả |
-|------|-------|
-| `S3_ENDPOINT` | URL API S3 (vd `https://s3-north1.viettelidc.com.vn`). Tương thích AWS S3, MinIO, Viettel IDC, Cloudflare R2... |
-| `S3_PUBLIC_ENDPOINT` | URL hiển thị cho user (thường giống `S3_ENDPOINT`). |
-| `S3_BUCKET_NAME` | Tên bucket (vd `knowledge-center`). |
-| `S3_ACCESS_KEY_ID` | Access key. |
-| `S3_SECRET_ACCESS_KEY` | Secret key. |
-| `S3_REGION` | Region label, mặc định `us-east-1`. |
-
-Object key theo format `docs/<domain-slug>/<sha256>.<ext>` hoặc `videos/<domain-slug>/<sha256>.<ext>` — deterministic, cùng nội dung + cùng domain → cùng key (idempotent, không duplicate storage). Domain slug ASCII-safe (`Pháp lý` → `phap-ly`, `mặc định` → `mac-dinh`, trống → `unsorted`). ACL `public-read` tự set per-object.
-
 ### Conversation Memory (Hybrid 3 tầng)
 
 | Biến | Mặc định | Mô tả |

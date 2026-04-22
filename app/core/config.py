@@ -46,13 +46,6 @@ COLLECTION_DOCS: str = _opt("COLLECTION_DOCS", "ttt_documents")
 COLLECTION_VIDEOS: str = _opt("COLLECTION_VIDEOS", "ttt_videos")
 VMEDIA_COLLECTIONS: list[str] = _opt("VMEDIA_COLLECTIONS", "vmedia_content,vmedia_design,vmedia_digital,vmedia_documents,vmedia_fonts,vmedia_image,vmedia_media,vmedia_qa,vmedia_ttnb").split(",")
 
-# --- S3-compatible storage (Viettel IDC / AWS / MinIO) ---
-S3_REGION: str = _opt("S3_REGION", "us-east-1")
-S3_ENDPOINT: str = _opt("S3_ENDPOINT", "")
-S3_PUBLIC_ENDPOINT: str = _opt("S3_PUBLIC_ENDPOINT", "")
-S3_BUCKET_NAME: str = _opt("S3_BUCKET_NAME", "")
-S3_ACCESS_KEY_ID: str = _opt("S3_ACCESS_KEY_ID", "")
-S3_SECRET_ACCESS_KEY: str = _opt("S3_SECRET_ACCESS_KEY", "")
 
 # --- Chunking ---
 CHUNK_MAX_TOKENS: int = int(_opt("CHUNK_MAX_TOKENS", "500"))

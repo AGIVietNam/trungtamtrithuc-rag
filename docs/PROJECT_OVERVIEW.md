@@ -15,7 +15,7 @@ Tính năng chính:
 7. **Hybrid memory 3 tầng** — sliding window + rolling summary (cùng session) + vector recall cross-session theo user.
 8. **Prompt caching 2 breakpoint** — cache persona+rules (system) và lịch sử hội thoại (messages) để cắt ~90% cost+latency ở turn thứ 2 trở đi.
 
-Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5** (Vision + describe table + query rewrite + metadata gen), **Voyage AI** (`voyage-3`, 1024-dim) cho embedding, **Qdrant Cloud** làm vector store, **S3-compatible** lưu file gốc public.
+Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5** (Vision + describe table + query rewrite + metadata gen), **Voyage AI** (`voyage-3`, 1024-dim) cho embedding, **Qdrant Cloud** làm vector store.
 
 ---
 
@@ -617,9 +617,6 @@ brew install poppler
 
 cp .env.example .env
 # Bắt buộc: ANTHROPIC_API_KEY, VOYAGE_API_KEY, QDRANT_URL, QDRANT_API_KEY
-# Tuỳ chọn S3 (file gốc có link click tải):
-#   S3_ENDPOINT, S3_PUBLIC_ENDPOINT, S3_BUCKET_NAME,
-#   S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_REGION
 # Tuỳ chọn: RERANKER_DEVICE=cpu|cuda|mps (mặc định auto-detect)
 # Tuỳ chọn Groq (video transcribe nhanh hơn Whisper local): GROQ_API_KEY
 # Tuỳ chọn vmedia cross-cluster: QDRANT_VMEDIA_URL, QDRANT_VMEDIA_API_KEY
@@ -701,14 +698,10 @@ cp .env.example .env
 
 ```
 Upload → tempfile
-  → [S3] upload docs/<domain-slug>/<sha256>.<ext>, ACL=public-read
-         Domain slug từ s3_client.slugify_domain():
-           'Pháp lý' → 'phap-ly', '' → 'unsorted'
-         → meta["url"] = public S3 URL (fallback: skip nếu S3 chưa config)
+  → payload.url = URL từ metadata/form → chat trả link click tải file gốc + jump #page=N
   → parse (3-tier) → doc_pipeline
   → detect tables → process (strip / describe / vision+context)
   → typo fix → chunk → embed → Qdrant.upsert (ttt_documents)
-  → payload.url = S3 URL → chat trả link click tải file gốc + jump #page=N
   → xoá chunks cũ cùng doc_id trước khi upsert mới
 ```
 
