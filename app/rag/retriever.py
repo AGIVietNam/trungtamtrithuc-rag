@@ -119,4 +119,13 @@ class Retriever:
                 deduped.append(hit)
 
         deduped.sort(key=lambda h: h.score, reverse=True)
-        return deduped[:top_k]
+        result = deduped[:top_k]
+
+        logger.info(
+            "retriever.retrieve: domain_filter=%r sources=%s "
+            "raw_hits=%d deduped=%d returned=%d top_score=%.4f",
+            domain_filter, sources,
+            len(all_hits), len(deduped), len(result),
+            result[0].score if result else 0.0,
+        )
+        return result
