@@ -9,6 +9,13 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import API_HOST, API_PORT
 
+# `app.ingestion.doc_pipeline` gắn FileHandler lên root logger (catch mọi
+# module), nhưng level root mặc định = WARNING → INFO bị filter trước khi
+# tới handler. Bật INFO cho namespace `app` để các log timing trong
+# RAGChain.answer + claude usage trong claude_client xuất hiện. Không động
+# tới root → urllib3/anthropic/etc. vẫn yên.
+logging.getLogger("app").setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 
