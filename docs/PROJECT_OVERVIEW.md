@@ -8,12 +8,14 @@ Tính năng chính:
 
 1. **Nạp tài liệu** đa định dạng (PDF, DOCX, XLSX, TXT, MD) qua pipeline 3 tier.
 2. **Nạp video** (YouTube URL, YouTube Playlist, file MP4/MKV/AVI/MOV) — phiên âm + embed theo timestamp.
-3. **AI auto-metadata** khi upload: tự sinh `title`, `description`, `domain` (7 label cố định), `tags` — Haiku tool use + Pydantic schema, FE prefill form để user review.
-4. **Hỏi đáp** với chuyên gia theo domain (BIM, MEP, kết cấu, marketing, pháp lý, sản xuất, hoặc tự do).
-5. **Gợi ý câu hỏi tiếp theo** tự động sau mỗi câu trả lời.
-6. **Session history** file-backed — nhớ hội thoại trong phiên để tiếp tục ngữ cảnh.
+3. **AI auto-metadata** khi upload: tự sinh `title`, `description`, `domain`, `tags` — Haiku tool use + Pydantic schema, FE prefill form để user review.
+4. **Hỏi đáp chuyên gia** theo 12 domain (BIM, MEP, kết cấu, marketing, pháp lý, sản xuất, công nghệ thông tin, nhân sự, tài chính, kinh doanh, thiết kế, hoặc tổng quát).
+5. **Streaming SSE** — token-by-token qua `POST /api/chat/stream` (fallback JSON tại `POST /api/chat/`).
+6. **Gợi ý câu hỏi tiếp theo** tự động sau mỗi câu trả lời.
+7. **Hybrid memory 3 tầng** — sliding window + rolling summary (cùng session) + vector recall cross-session theo user.
+8. **Prompt caching 2 breakpoint** — cache persona+rules (system) và lịch sử hội thoại (messages) để cắt ~90% cost+latency ở turn thứ 2 trở đi.
 
-Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5** (Vision + describe table), **Voyage AI** (`voyage-3`, 1024-dim) cho embedding, **Qdrant Cloud** làm vector store.
+Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5** (Vision + describe table + query rewrite + metadata gen), **Voyage AI** (`voyage-3`, 1024-dim) cho embedding, **Qdrant Cloud** làm vector store, **S3-compatible** lưu file gốc public.
 
 ---
 
@@ -27,36 +29,43 @@ Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5**
                     |   ingest / knowledge     |
                     +------------+-------------+
                                  |
-                            HTTP REST
+                        HTTP REST + SSE
                                  |
                     +------------v-------------+
                     |   FastAPI Server         |
                     |   (app/main.py)          |
+                    |   warmup: reranker +     |
+                    |           payload index  |
                     +------------+-------------+
                                  |
             +--------------------+---------------------+
             |                                          |
   +---------v---------+                    +-----------v-----------+
   |  /api/chat        |                    |  /api/ingest          |
-  |   (RAG answer)    |                    |   file / video / yt   |
+  |   / (JSON)        |                    |   file / video / yt   |
+  |   /stream (SSE)   |                    |   + preview endpoints |
   +---------+---------+                    +-----------+-----------+
             |                                          |
   +---------v---------+                    +-----------v-----------+
   |   RAG Chain       |                    |  Ingestion Pipelines  |
-  |  - Retriever      |                    |  - doc_parser (3-tier)|
-  |  - Reranker       |                    |  - doc_pipeline       |
-  |  - Prompt builder |                    |    (table + Vision    |
-  |  - Claude Sonnet4 |                    |     with context)     |
-  |  - Suggestions    |                    |  - video_pipeline     |
+  |  - Query rewrite  |                    |  - doc_parser (3-tier)|
+  |    (conditional)  |                    |  - doc_pipeline       |
+  |  - Embed ONCE     |                    |    (table + Vision    |
+  |  - Retrieve ∥     |                    |     with context)     |
+  |    recall         |                    |  - video_pipeline     |
+  |  - Rerank (GPU)   |                    |  - metadata_generator |
+  |  - Refuse guard   |                    |    (Haiku tool use)   |
+  |  - Prompt build   |                    |                       |
+  |  - Claude Sonnet4 |                    |                       |
   +---------+---------+                    +-----------+-----------+
             |                                          |
   +---------v------------------------------------------v----------+
   |                    Qdrant Vector Database                    |
-  |  +----------------+  +----------------+                      |
-  |  | ttt_documents  |  | ttt_videos     |                      |
-  |  |   payload.url  |  | payload.url    |   ← public S3 URL   |
-  |  +----------------+  +----------------+                      |
-  |                                                              |
+  |  +----------------+  +----------------+  +----------------+  |
+  |  | ttt_documents  |  | ttt_videos     |  | ttt_memory     |  |
+  |  |   payload.url  |  | payload.url    |  |  user_id idx   |  |
+  |  +----------------+  +----------------+  |  session_id    |  |
+  |                                          +----------------+  |
   |  +---------------------------------------------------------+ |
   |  | vmedia_* (READ ONLY — cluster riêng)                    | |
   |  | content, design, digital, documents, fonts, image,      | |
@@ -67,8 +76,8 @@ Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5**
             +-----------------------------------------------------+
             |   S3-compatible Object Storage                      |
             |   (AWS / Viettel IDC / MinIO / R2)                  |
-            |   bucket/docs/<domain-slug>/<sha256>.pdf            |
-            |   bucket/videos/<domain-slug>/<sha256>.mp4          |
+            |   bucket/docs/<domain-slug>/<sha256>.<ext>          |
+            |   bucket/videos/<domain-slug>/<sha256>.<ext>        |
             |   Domain slug ASCII: 'Pháp lý' → 'phap-ly',         |
             |   trống → 'unsorted'                                |
             |   Upload lúc ingest; URL lưu ở payload.url          |
@@ -219,7 +228,8 @@ YouTube URL / Playlist URL / File MP4
     │    → segments [{start, text}, ...]
     │    Retry tối đa 10 lần, xoay proxy mỗi lần
     │
-    └─ File local: Whisper (openai-whisper)
+    └─ File local: video_transcriber.get_transcriber()
+         Thứ tự: Groq (nếu có GROQ_API_KEY) > Whisper local
          → segments [{start, text}, ...]
     │
     ▼
@@ -252,7 +262,7 @@ Khi user upload, FE gọi endpoint **preview** để AI sinh metadata trước k
 | `POST /api/ingest/video/file/preview` | multipart file video | `get_transcriber()` (Groq nếu có, fallback Whisper local) → ghép segment text → Haiku tool use | title, description, domain, tags |
 | `POST /api/ingest/youtube/preview?url=…` | query url | `yt-dlp --dump-single-json` (title/description/thumbnail/channel/duration) + transcript best-effort → Haiku chỉ classify domain/tags | title+description (từ YouTube) + domain+tags (từ AI) |
 
-**Playlist URL** → `/youtube/preview` trả `status=skip` (mỗi video playlist có metadata khác nhau, không gen cho cả list).
+**Playlist URL** → `/youtube/preview` trả `status=ok` với `is_playlist: true`, metadata cấp playlist (title/description/uploader/thumbnail/video_count). Metadata sẽ gắn vào mọi chunk con khi ingest thực sự.
 
 ### Structured output — Anthropic tool use + Pydantic
 
@@ -269,6 +279,8 @@ Khi user upload, FE gọi endpoint **preview** để AI sinh metadata trước k
                   "minItems": 0, "maxItems": 10}
 }
 ```
+
+> **Lưu ý:** metadata generator hiện chỉ classify vào **7 domain gốc** (không bao gồm 5 domain mở rộng của chat như nhân sự/tài chính/kinh doanh/CNTT/thiết kế). Document classify sai sẽ rơi vào `"mặc định"`. Khi thêm domain mới vào chat, cần cập nhật `DOMAIN_VALUES` ở metadata_generator song song để dedupe tri thức.
 
 Domain là `Literal` enum trong Pydantic → LLM **không thể sinh label ngoài 7 giá trị** (constrained decoding ở API level). Tags được normalize sau (lowercase, dedup, strip punctuation, cap 8).
 
@@ -311,24 +323,35 @@ Trong toàn bộ flow: field nào user **đã nhập tay** (không có class `ai
 User query
     │
     ▼
-[EMBED] Voyage embed_query
+[REWRITE] app/core/conv_query_rewriter.py — CONDITIONAL
+    Chỉ gọi Haiku khi TẤT CẢ: có history + query < CONV_REWRITE_MIN_LEN (40)
+    + match anaphora markers ("nó", "cái đó", "vậy", "ấy"…).
+    Microsoft RAG production guide: 50-70% turn có thể bỏ qua bước này.
+    Cắt 1-3s/turn cho câu đã standalone.
     │
     ▼
-[RETRIEVE] Parallel search (ThreadPoolExecutor, 3 nguồn)
-    │   Qdrant filter: domain = X OR is_empty(domain)
-    │
-    ├─ ttt_documents
-    ├─ ttt_videos
-    └─ vmedia_* (nếu có QDRANT_VMEDIA_API_KEY)
+[EMBED ONCE] Voyage embed_query (LRU cache 256 keys)
+    Cùng query string (normalized) trong phiên → trả vector cached, 0ms.
+    Vector này REUSE cho cả retriever + conv_memory — tiết kiệm 1 Voyage call/turn
+    (quan trọng với free tier 3 RPM).
     │
     ▼
-[DEDUP] theo prefix text (80 ký tự) + sort theo score
+[RETRIEVE ∥ RECALL] concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    │   Qdrant filter doc: domain = X OR is_empty(domain)
+    │
+    ├─ retriever.retrieve()  (parallel 3 nguồn: ttt_documents, ttt_videos, vmedia_*)
+    │    dedup theo prefix text (80 ký tự) + sort theo score
+    │
+    └─ conv_memory.retrieve() — nếu `should_skip_recall(query) = False`
+         skip cho: len < 6, chào hỏi, ack, yes/no
+         filter: user_id = X, kind ∈ {conversation_pair, null}
+         exclude: session_id hiện tại (L1 window đã cover)
     │
     ▼
 [RERANK] CrossEncoderReranker (BAAI/bge-reranker-v2-m3, ~568M)
     Auto-detect device: cuda > mps > cpu (override RERANKER_DEVICE)
     Warmup eager-load tại FastAPI lifespan → request đầu ~35ms thay vì 5s
-    Trả về top-K (mặc định 3-5)
+    Trả về top-RERANK_TOP_K (mặc định 5)
     │
     ▼
 [GUARD] chain._should_refuse(hits)
@@ -336,62 +359,86 @@ User query
     KHÔNG gọi Claude (tiết kiệm $ + chặn hallucinate ở gốc)
     │
     ▼
-[CONTEXT BUILD] prompt_builder.build_context_block
-    XML: <retrieved_documents>
-           <document index="1">
-             <source>title — url — trang/timestamp</source>
-             <content>chunk text + table_data (nếu có)</content>
-           </document>
-           ...
-         </retrieved_documents>
-    Source mapping (dedup theo title+url, merge positions)
+[PROMPT BUILD] — phân chia theo trục CACHE / KHÔNG CACHE
+    │
+    ├─ system (STABLE → cache_control: ephemeral)
+    │    persona[domain] + _BASE_RULES (language/grounding/refusal/
+    │    answer_format/citation/followup)
+    │
+    └─ messages:
+         ...history (sliding window, đã được pin cache_control ở assistant
+            gần nhất — xem "Prompt caching" phía dưới)...
+         {
+           role: "user",
+           content:
+             <retrieved_documents>...</retrieved_documents>    ← TOP (long-context)
+             <user_context>...</user_context>                   ← recall pairs
+             <session_summary>...</session_summary>             ← rolling summary
+             <task>Dựa CHỈ vào <retrieved_documents>...</task>  ← reminder ngắn
+             Câu hỏi của tôi: {query}                           ← BOTTOM (+30% quality)
+         }
     │
     ▼
-[CONV BUILD] prompt_builder.build_conversation_block(summary, recall_pairs)
-    XML: <session_summary>...</session_summary>
-         <user_context>
-           [#1 — 2 ngày trước]
-           USER: ... | BOT: ...
-           [#2 ...]
-         </user_context>
-    │
-    ▼
-[PROMPT] system = DOMAIN_PERSONAS[domain] + _BASE_RULES + conv_block
-    DOMAIN_PERSONAS: bim | mep | kết cấu | marketing | pháp lý | sản xuất | mặc định
-    _BASE_RULES (positive framing, XML sections):
-      <language_style>      tiếng Việt, xưng "tôi"/gọi "bạn", format số VN
-      <reasoning_process>   quote-first grounding (ngầm) + kiểm tra fact có trong doc không
-      <grounding_rules>     STRICT — cấm Claude dùng training data cho định nghĩa/
-                            framework (4P/PDCA/SWOT)/best practice. Chỉ cho tính
-                            toán số học thuần trên số đã có trong doc hoặc user.
-      <refusal_protocol>    template cứng khi doc không đủ; không "bù" bằng kiến thức chung
-      <citation_rules>      trích TÊN, mục "Nguồn:" hoặc bỏ nếu xã giao
-      <followup_suggestions> 3 câu rút từ <retrieved_documents>
-    │
-    ▼
-[LLM] Claude Sonnet 4
-    messages = history + [{role: user, content: query}]
+[LLM] Claude Sonnet 4 — sync (generate) hoặc stream (generate_stream)
+    Log usage: input / cache_write / cache_read / output tokens
     │
     ▼
 [PARSE]
     - Split tại "---GỢI Ý---" → (clean_answer, suggested_questions[3])
     - Ẩn sources nếu user chỉ chào hỏi (không có "Nguồn:" trong answer)
-    - Confidence = high/medium/low theo top score
+    - Confidence = high / medium / low theo top score
 ```
 
-### Domain chuyên gia
+### Domain chuyên gia (12 persona)
 
-| Domain | Phong cách |
-|--------|-----------|
-| `mặc định` | Trợ lý tri thức chung |
-| `bim` | Chuyên gia BIM — LOD, clash, Revit/Navisworks, IFC, BEP |
-| `mep` | Kỹ sư MEP — HVAC, PCCC, sprinkler, ELV, BMS, TCVN/ASHRAE/NFPA |
-| `kết cấu` | Structural — BTCT, thép, móng, ETABS/SAP, TCVN/Eurocode/ACI |
-| `marketing` | Brand, 4P/7P, digital, funnel, KPI, ROI, A/B test |
-| `pháp lý` | Luật Xây dựng/Đầu tư/Doanh nghiệp/Lao động/Dân sự — trích Điều/Khoản |
-| `sản xuất` | Lean, 5S, Kaizen, OEE, Six Sigma, SOP, BOM, MRP |
+| Domain | Vai trò | Thuật ngữ chốt (không dịch) |
+|--------|---------|-----------------------------|
+| `mặc định` | Trợ lý Tri thức TDI tổng quát | — |
+| `bim` | Chuyên gia BIM 10+ năm | LOD, clash detection, federated model, CDE, ISO 19650 |
+| `mep` | Kỹ sư trưởng MEP 12+ năm | HVAC, sprinkler, busduct, ELV, BMS, TCVN/ASHRAE/NFPA |
+| `kết cấu` | Kỹ sư trưởng Kết cấu 15+ năm | BTCT, mác bê tông, mô-men uốn, TCVN/Eurocode/ACI |
+| `marketing` | Giám đốc Marketing 10+ năm | brand positioning, conversion rate, customer journey, MQL/SQL |
+| `pháp lý` | Trưởng phòng Pháp chế 12+ năm | Điều/Khoản/Điểm, Chủ đầu tư vs Nhà đầu tư, Nghị định/Thông tư |
+| `sản xuất` | Giám đốc Sản xuất 12+ năm | OEE, takt vs cycle time, Kaizen, yield rate |
+| `công nghệ thông tin` | Giám đốc CNTT 12+ năm | VPN, SSO, backup vs DR, endpoint |
+| `nhân sự` | CHRO 12+ năm | C&B, OKR vs KPI, thử việc ≠ học việc, BHXH/BHYT/BHTN |
+| `tài chính` | CFO 12+ năm | doanh thu/lợi nhuận/dòng tiền, EBITDA, NPV, VAS/IFRS |
+| `kinh doanh` | Giám đốc Kinh doanh 12+ năm | pipeline, KAM, closing rate, forecast |
+| `thiết kế` | Giám đốc Thiết kế 12+ năm | concept vs schematic design, shop drawing, mặt bằng công năng |
 
-Domain khác → prompt tổng quát: `"Bạn là chuyên gia về '<domain>'..."`.
+Mỗi persona có khối **PHẠM VI** (trả lời / không trả lời) và **THUẬT NGỮ CHUẨN** (tránh dịch sai gây nhiễu). Domain không thuộc 12 key trên → prompt tổng quát: `"Bạn là chuyên gia về '<domain>'..."`.
+
+Lookup case-insensitive + trim (`.lower().strip()`) — FE có thể truyền `"BIM"` hoặc `"  bim  "` đều map đúng.
+
+### Prompt caching — 2 breakpoint
+
+Anthropic cho phép tối đa 4 `cache_control` block/request. Ở đây dùng 2:
+
+1. **System prompt** (persona + `_BASE_RULES`) — stable cross-turn → cache_control ephemeral ngay trong block system. Cache HIT từ turn 2 trở đi cho cùng domain.
+2. **Lịch sử assistant gần nhất** — `_attach_history_cache()` trong `claude_client.py` scan từ cuối `messages` lùi về, gắn `cache_control` vào block cuối của **assistant gần nhất** (bỏ qua user mới vì user mới chứa `<retrieved_documents>` đổi mỗi request). Turn N+1 sẽ cache HIT toàn bộ prefix `[system + user1 + asst1 + ... + asstN]` trong lookback window của Anthropic (≤20 blocks).
+
+Tại sao KHÔNG cache documents/conv_block? Chúng đổi mỗi turn → cache luôn miss → chỉ tốn 1.25× cache-write premium mà không bao giờ đọc lại.
+
+Log usage in-line (log level INFO, namespace `app`):
+
+```
+claude usage [sync]: in=12340 cache_write=8200 cache_read=0   out=612    # turn 1
+claude usage [sync]: in=12840 cache_write=500  cache_read=8200 out=580   # turn 2 — HIT
+```
+
+### Guard ngưỡng tin cậy (pre-LLM refusal)
+
+`_MIN_CONFIDENCE_TO_ANSWER = 0.25` (BGE reranker score, [−∞, +∞]). Nếu `hits` rỗng hoặc `hits[0].score < 0.25` → trả refusal template cứng ngay, **KHÔNG gọi Claude**. Chặn hallucinate từ training data ngay ở gốc, tiết kiệm luôn 1 lần gọi Sonnet:
+
+```
+Tài liệu TDI hiện chưa có thông tin về câu hỏi này.
+Bạn có thể:
+- Bổ sung tài liệu liên quan qua trang nạp dữ liệu.
+- Thử đổi sang lĩnh vực 'Tất cả lĩnh vực' để mở rộng tìm kiếm.
+- Diễn đạt lại câu hỏi với từ khoá cụ thể hơn.
+```
+
+Refusal chính thức có trong `<refusal_protocol>` của `_BASE_RULES` để Claude dùng lại đúng template khi tài liệu có hit nhưng không đủ thông tin.
 
 ### Suggested Questions
 
@@ -403,7 +450,7 @@ Mỗi câu trả lời kèm 3 câu hỏi gợi ý ở cuối, bắt đầu bằn
 3. Ngân sách dự kiến?
 ```
 
-Parser regex tách ra trường `suggested_questions[]` trong response JSON.
+Parser regex tách ra trường `suggested_questions[]` trong response JSON. Câu xã giao (chào, cảm ơn) → Claude bỏ luôn khối `---GỢI Ý---` theo chỉ dẫn trong `<citation_rules>`.
 
 ---
 
@@ -426,15 +473,18 @@ POST /api/chat/ {message, session_id, user_id, domain}
   ├─► session_memory.get_summary(sid)      # tầng 2
   │
   ├─► RAGChain.answer():
-  │     ├─ conv_query_rewriter.rewrite()   # giải đại từ "nó / cái đó / ngân sách đó"
-  │     ├─ parallel:
-  │     │   ├─ retriever.retrieve()        # doc RAG (ttt_documents + ttt_videos + vmedia)
-  │     │   └─ conv_memory.retrieve()      # tầng 3 — filter user_id, same-session exclude
-  │     ├─ reranker.rerank()
-  │     ├─ build_system_prompt(domain)     # XML: rules + language_style + reasoning
-  │     ├─ build_conversation_block()      # XML: <session_summary> + <user_context>
-  │     ├─ build_context_block()           # XML: <retrieved_documents>
-  │     └─ claude.generate()
+  │     ├─ conv_query_rewriter.rewrite()   # anaphora-conditional, skip nếu standalone
+  │     ├─ voyage.embed_query()            # LRU cache, 1 lần, reuse xuống dưới
+  │     ├─ parallel (max_workers=2):
+  │     │   ├─ retriever.retrieve(query_vec=vec)   # doc RAG (ttt_* + vmedia_*)
+  │     │   └─ conv_memory.retrieve(query_vec=vec) # tầng 3 — skip nếu chào/ack
+  │     ├─ reranker.rerank()               # GPU auto (cuda > mps > cpu)
+  │     ├─ _should_refuse(hits)            # pre-LLM guard, score < 0.25 → refusal
+  │     ├─ build_system_prompt(domain)     # stable → cache breakpoint #1
+  │     ├─ build_documents_block(hits)     # <retrieved_documents>
+  │     ├─ build_conversation_block()      # <user_context> + <session_summary>
+  │     ├─ build_user_turn()               # docs + conv + <task> + query ở BOTTOM
+  │     └─ claude.generate()               # _attach_history_cache pin breakpoint #2
   │
   └─► background task:
         ├─ session_memory.add_turn()
@@ -454,7 +504,12 @@ Mỗi turn, trước khi upsert pair vào `ttt_memory`, pipeline chạy 4 lớp 
 | 2 | **Hash dup LRU** | `conv_memory._hash_seen` | MD5 của pair đã normalize (lowercase + collapse whitespace + strip punctuation) — LRU `OrderedDict` per-user, size `CONV_HASH_CACHE_SIZE=2000`. Trùng exact → skip **trước cả embed**. | 0 |
 | 3 | **Semantic dedup** | `conv_memory._find_near_duplicate` | Embed pair (1 lần, reuse cho upsert), search Qdrant filter `user_id` với `score_threshold=CONV_DEDUP_THRESHOLD` (0.92). Có hit → gọi `_touch_last_seen()` update payload `last_seen_at` của pair cũ thay vì insert point mới. Giữ cluster collection compact, biết pair nào "hot". | +1 Qdrant search (~5ms) |
 
-**Same-session filter** (read side, không liên quan upsert): `conv_memory.retrieve()` loại pair cùng `session_id` hiện tại — vì đã có trong L1 sliding window + L2 summary, recall lại sẽ trùng context.
+**Read-side skip** (không liên quan upsert):
+
+- `ConversationMemory.should_skip_recall(query)` — nếu query < 6 ký tự hoặc match `_SKIP_PATTERNS` → chain **không submit** Qdrant recall call. Chào/ack không cần recall, tiết kiệm 1 round-trip + noise prompt.
+- **Same-session filter** — `retrieve()` loại pair cùng `session_id` hiện tại vì đã có trong L1 window + L2 summary.
+
+**Payload indexes** — tại lifespan `FastAPI`, `conv_memory.ensure_indexes()` gọi `PUT /collections/ttt_memory/index` cho `user_id` + `session_id` (idempotent). Trước fix này, mọi filter bị Qdrant từ chối 400 và bị `try/except` nuốt im lặng → tier-3 recall + semantic dedup chưa từng chạy đúng.
 
 Threshold chọn dựa trên: Mem0 paper dùng 0.95 cho entity merge, EMem paper dùng 0.90 cho synonym edge. 0.92 = trung dung cho Voyage-3 1024-dim. Log mỗi lần skip để audit volume ("conv_memory skip upsert (heuristic/hash/semantic): user=... reason=...").
 
@@ -467,42 +522,60 @@ Threshold chọn dựa trên: Mem0 paper dùng 0.95 cho entity merge, EMem paper
 
 ---
 
+## Voyage Embed — tối ưu free tier 3 RPM
+
+Voyage free plan giới hạn **3 request/phút**. Không xử lý khéo, chỉ 2-3 user chat song song là dính 429 và backoff nối đuôi → latency >60s. 3 đòn bẩy trong `app/core/voyage_embed.py`:
+
+1. **LRU query cache** (`_QUERY_CACHE_SIZE=256`) — key theo `(model, text_normalized)` với text lowercased + collapsed whitespace. `embed_query()` trả vector cached nếu hit → **0 network call**. Chat thực tế có 15-25% turn user gõ lại query gần giống (typo, follow-up) nên cache hit-rate cao.
+2. **429 backoff dùng `Retry-After` header** — trước đây hardcoded 25s × 3 retry = 75s idle. Giờ parse `Retry-After` thật (clamp `[1, 15]`), fallback 5s nếu header trống.
+3. **Embed-once reuse** — `RAGChain.answer()` embed 1 lần, truyền `query_vec=` xuống `retriever.retrieve()` và `conv_memory.retrieve()` thay vì mỗi nơi embed lại. Cắt **2 → 1 Voyage call/turn**.
+
+Kết quả commit `d525940`: turn 2+ latency **>60s → ~3-5s** trên Voyage free tier.
+
+---
+
 ## Cấu trúc thư mục
 
 ```
 trungtamtrithuc/
 ├── app/
-│   ├── main.py                  # FastAPI app + CORS + static mount
-│   ├── config.py                # Env vars (Voyage, Qdrant, Claude, Proxy)
+│   ├── main.py                  # FastAPI + CORS + static + lifespan (warmup + ensure_indexes)
+│   ├── config.py                # Env vars (Voyage, Qdrant, Claude, Proxy, Conv tuning)
 │   ├── schemas.py               # ChatRequest/Response, Ingest, KnowledgeSearch
 │   ├── api/
 │   │   ├── chat.py              # POST /api/chat/ (JSON) + /api/chat/stream (SSE)
 │   │   └── ingest.py            # POST /api/ingest/{file,video/file,youtube,youtube-playlist}
+│   │                            #   + /…/preview cho file, video, youtube
 │   ├── core/
 │   │   ├── chunker.py           # Heading-aware chunking (tiktoken cl100k_base)
 │   │   ├── claude_client.py     # Anthropic messages client (sync + stream)
-│   │   ├── voyage_embed.py      # Voyage embedder (query vs document)
-│   │   ├── qdrant_store.py     # QdrantStore (R/W) + VMediaReadOnlyStore
+│   │   │                        #   + _attach_history_cache (cache breakpoint #2)
+│   │   │                        #   + _log_usage (in/cache_write/cache_read/out)
+│   │   ├── voyage_embed.py      # Voyage embedder + LRU query cache + 429 backoff
+│   │   ├── qdrant_store.py      # QdrantStore (R/W) + VMediaReadOnlyStore
 │   │   ├── s3_client.py         # boto3 wrapper cho S3-compatible (AWS/Viettel IDC/MinIO/R2)
+│   │   │                        #   + slugify_domain(), PREFIX_DOCS/PREFIX_VIDEOS
 │   │   ├── session_memory.py    # Sliding window + rolling summary (file JSON)
 │   │   ├── conv_memory.py       # Vector recall Qdrant ttt_memory (cross-session)
+│   │   │                        #   + ensure_indexes, should_skip_recall, 4-layer guards
 │   │   ├── conv_summarizer.py   # Haiku summarize rolled turns
-│   │   └── conv_query_rewriter.py  # Haiku rewrite đại từ → query độc lập
+│   │   └── conv_query_rewriter.py  # Haiku rewrite — anaphora-conditional
 │   ├── ingestion/
 │   │   ├── doc_parser.py        # 3-tier parser + typo fix
 │   │   ├── doc_pipeline.py      # Table detect + LLM describe + Vision+context
+│   │   ├── metadata_generator.py   # Haiku tool use + Pydantic → title/desc/domain/tags
 │   │   ├── video_pipeline.py    # YouTube + local + playlist
-│   │   ├── video_transcriber.py # Whisper wrapper
-│   │   └── youtube_fetcher.py   # youtube-transcript-api + proxy rotation
+│   │   ├── video_transcriber.py # Groq (if key) > Whisper local
+│   │   └── youtube_fetcher.py   # youtube-transcript-api + yt-dlp + proxy rotation
 │   └── rag/
-│       ├── chain.py             # Retrieve → rerank → generate → parse suggestions
-│       ├── retriever.py         # Multi-source parallel search
-│       ├── reranker.py          # Cross-encoder reranker
-│       └── prompt_builder.py    # Domain presets + context + table_data
+│       ├── chain.py             # Rewrite → embed-once → retrieve∥recall → rerank → guard → generate
+│       ├── retriever.py         # Multi-source parallel search (3 nguồn, query_vec reuse)
+│       ├── reranker.py          # Cross-encoder (BGE v2-m3), GPU auto + warmup
+│       └── prompt_builder.py    # DOMAIN_PERSONAS (12) + _BASE_RULES + build_system/docs/conv/user_turn
 ├── web/                         # Static frontend
 │   ├── index.html
-│   ├── chat.html
-│   ├── ingest.html
+│   ├── chat.html                # Chat UI + SSE stream + markdown render
+│   ├── ingest.html              # Upload form + AI preview badge (AI tím, YT đỏ)
 │   └── knowledge.html
 ├── data/{uploads,logs,sessions}/    # Runtime (sessions = file JSON session_memory)
 ├── scripts/
@@ -548,16 +621,32 @@ cp .env.example .env
 #   S3_ENDPOINT, S3_PUBLIC_ENDPOINT, S3_BUCKET_NAME,
 #   S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_REGION
 # Tuỳ chọn: RERANKER_DEVICE=cpu|cuda|mps (mặc định auto-detect)
+# Tuỳ chọn Groq (video transcribe nhanh hơn Whisper local): GROQ_API_KEY
+# Tuỳ chọn vmedia cross-cluster: QDRANT_VMEDIA_URL, QDRANT_VMEDIA_API_KEY
 
 ./run.sh
 ```
+
+### Biến môi trường chính
+
+| Group | Biến | Default | Ghi chú |
+|-------|------|---------|---------|
+| Retrieval | `TOP_K` | 7 | Số chunk lấy từ mỗi nguồn trước rerank |
+| Retrieval | `RERANK_TOP_K` | 5 | Số chunk giữ lại sau rerank gửi vào prompt |
+| Conv | `CONV_WINDOW_TURNS` | 3 | Số turn giữ trong sliding window |
+| Conv | `CONV_REWRITE_MIN_LEN` | 40 | Query ≥ len này → skip rewrite (auto-standalone) |
+| Conv | `CONV_DEDUP_THRESHOLD` | 0.92 | Cosine ngưỡng semantic dedup ttt_memory |
+| Conv | `CONV_HASH_CACHE_SIZE` | 2000 | LRU hash dup per-user |
+| Conv | `CONV_MIN_USER_CHARS` | 20 | User msg < → skip upsert |
+| Conv | `CONV_MIN_BOT_CHARS` | 40 | Bot msg < (và không "Nguồn:") → skip |
+| Rerank | `RERANKER_DEVICE` | auto | `cpu` / `cuda` / `mps` |
 
 ### Truy cập
 
 | URL | Mô tả |
 |-----|-------|
 | `http://localhost:8000/` | Trang chủ |
-| `http://localhost:8000/chat.html` | Chat |
+| `http://localhost:8000/chat.html` | Chat (SSE stream) |
 | `http://localhost:8000/ingest.html` | Nạp tài liệu / video |
 | `http://localhost:8000/knowledge.html` | Quản lý tri thức |
 | `http://localhost:8000/docs` | Swagger API |
@@ -573,10 +662,13 @@ cp .env.example .env
 | Claude Vision | Docling fail / bảng có màu | ~$0.002/trang |
 | LLM describe table | Bảng có dữ liệu | ~$0.001/bảng |
 | Voyage embed | Luôn chạy | ~$0.0001/chunk |
-| Claude Sonnet 4 answer | Mỗi câu trả lời | ~$0.003-0.015/lần |
+| Claude Sonnet 4 answer (turn 1, no cache) | Mỗi câu | ~$0.005-0.02 |
+| Claude Sonnet 4 answer (turn 2+, cache HIT) | Mỗi câu | ~$0.001-0.005 ~5-10× rẻ hơn |
+| Haiku query rewrite | Turn có anaphora + short | ~$0.0002/turn |
 | **File text thuần** (Docling OK) | | **~$0.001** |
 | **File phức tạp** (Vision + LLM) | | **~$0.005-0.01** |
-| **Chat 1 turn** | | **~$0.005-0.02** |
+| **Chat 1 turn (turn 1)** | | **~$0.005-0.02** |
+| **Chat 1 turn (turn 2+ cache HIT)** | | **~$0.001-0.005** |
 
 ---
 
@@ -586,17 +678,19 @@ cp .env.example .env
 |------------|-----------|
 | Backend | Python 3.12, FastAPI, Uvicorn |
 | LLM trả lời | Claude Sonnet 4 (`claude-sonnet-4-20250514`) |
-| LLM Vision / Describe table | Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) |
-| Embedding | Voyage AI `voyage-3` — 1024-dim |
+| LLM Vision / Describe table / Rewrite / Metadata | Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) |
+| Prompt caching | Anthropic ephemeral cache — 2 breakpoint (system + history) |
+| Embedding | Voyage AI `voyage-3` — 1024-dim, LRU cache 256 keys |
 | Vector DB | Qdrant Cloud (2 cluster: main + vmedia read-only) |
 | PDF parser | Docling (IBM) → Claude Vision → pdfplumber |
 | PDF → image | pdf2image + poppler |
 | DOCX | Docling / python-docx |
 | XLSX | openpyxl |
-| Video transcribe | yt-dlp, youtube-transcript-api, Whisper |
-| Reranker | sentence-transformers (cross-encoder), torch (CUDA/MPS/CPU auto) |
+| Video transcribe | yt-dlp, youtube-transcript-api, Groq (nếu có key), Whisper local |
+| Reranker | sentence-transformers cross-encoder (BGE v2-m3), torch (CUDA/MPS/CPU auto) |
 | Tokenizer | tiktoken (`cl100k_base`) |
 | Object storage | boto3 (S3-compatible: AWS/Viettel IDC/MinIO/R2) |
+| Streaming | Server-Sent Events (SSE) |
 | Frontend | HTML/CSS/JS thuần (static) |
 
 ---
@@ -630,31 +724,45 @@ URL / File → transcribe → segments
     YouTube URL với remote), timestamp, youtube_url kèm &t=Xs nếu YouTube
 ```
 
-### 3. Chat (RAG answer)
+### 3. Chat (RAG answer — streaming SSE)
 
 ```
-POST /api/chat/
-  → get history từ session_memory (file-backed)
-  → RAGChain.answer(query, history, domain):
-      → Retriever parallel 3 nguồn + dedup + sort
-      → CrossEncoderReranker (GPU auto: cuda > mps > cpu) → top 3-5
-      → _should_refuse(hits): hits rỗng hoặc top_score < 0.25
-         → trả refusal template cứng, KHÔNG gọi Claude
-      → build system_prompt (domain preset + _BASE_RULES strict grounding)
-      → build context_block (+ table_data)
-      → Claude Sonnet 4.generate()
+POST /api/chat/stream
+  → get history + summary từ session_memory (file-backed)
+  → RAGChain.answer_stream(query, history, domain):
+      → conv_query_rewriter.rewrite()  # anaphora-conditional (skip nếu đã standalone)
+      → voyage.embed_query()           # LRU cache
+      → parallel:
+           retriever.retrieve(query_vec=vec)
+           conv_memory.retrieve(query_vec=vec)  # skip nếu chào/ack
+      → CrossEncoderReranker (GPU auto) → top RERANK_TOP_K=5
+      → _should_refuse(hits): score < 0.25 → emit refusal SSE, không gọi Claude
+      → build system_prompt (domain + _BASE_RULES, cache_control)
+      → build user_turn: <retrieved_documents> + <user_context> +
+                         <session_summary> + <task> + "Câu hỏi của tôi: …"
+      → _attach_history_cache (pin assistant gần nhất)
+      → claude.generate_stream()
+          emit events: meta → delta* → done
+      → log usage in/cache_write/cache_read/out
       → split "---GỢI Ý---" → (answer, suggestions[3])
-  → memory.add_turn(session_id, user_msg, answer)
+  → background: session_memory.add_turn + rolling_summary + conv_memory.upsert_pair
 ```
+
+Fallback JSON tại `POST /api/chat/` giữ nguyên contract cho client chưa hỗ trợ SSE.
 
 ---
 
 ## Hướng phát triển
 
-- ~~**Streaming response**~~ ✅ Đã wire `POST /api/chat/stream` (SSE). `RAGChain.answer_stream()` chạy đầy đủ flow (rewrite → retrieve/recall → rerank → stream) và emit events `meta`/`delta`/`done`/`error`. FE `web/chat.html` render token dần, replace bubble ở event `done` với sources + suggested_questions. Background memory update chạy sau khi stream đóng.
+- ~~**Streaming response**~~ ✅ `POST /api/chat/stream` SSE, FE render token dần.
+- ~~**Prompt cache tối ưu**~~ ✅ 2 breakpoint (system stable + history assistant). Cache HIT từ turn 2 trở đi, cắt ~5-10× cost prompt ổn định.
+- ~~**GPU reranker**~~ ✅ Auto-detect cuda > mps > cpu + warmup lifespan.
+- ~~**Pre-LLM refusal guard**~~ ✅ `_should_refuse(hits)` score < 0.25.
+- ~~**S3 domain-slug layout**~~ ✅ `docs/<domain-slug>/<sha256>.<ext>`.
 - **Auth thật** — hiện `user_id` là string tự do client truyền; tích hợp đăng nhập để verify + chống impersonate memory của user khác.
 - **User profile extract** — tách fact cá nhân (tên, team, ngân sách, preference) ra block riêng thay vì lẫn trong recall pairs — tăng độ bền trước khi recall score rơi dưới threshold.
+- **Đồng bộ domain cross-module** — metadata_generator hiện chỉ có 7 domain, chat có 12. Khi classify, 5 domain mới bị ép vào `"mặc định"`. Cần merge để dedupe tri thức đúng label.
 - **Admin CRUD knowledge** — delete/re-index tài liệu từ `knowledge.html`.
 - **Evaluation harness** — tập test câu hỏi + ground truth để đo recall/precision.
-- **Prompt cache tối ưu** — move `<retrieved_documents>` từ system block sang user turn để cache stable persona cross-query (giảm ~90% cost phần prompt ổn định).
 - **Multi-tenant** — tách namespace theo organization.
+- **429 graceful UI** — chat hiển thị thông báo thân thiện khi Voyage rate-limit thay vì show raw URL + HTTPError (xem screenshot issue ngày 2026-04-22).
