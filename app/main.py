@@ -1,35 +1,13 @@
 from __future__ import annotations
 
-import logging
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
-from logging.handlers import TimedRotatingFileHandler
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.config import API_HOST, API_PORT, LOG_DIR
-
-_app_logger = logging.getLogger("app")
-_app_logger.setLevel(logging.INFO)
-
-_API_LOG_FILE = LOG_DIR / "api.log"
-if not any(
-    isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == str(_API_LOG_FILE)
-    for h in _app_logger.handlers
-):
-    _fh = TimedRotatingFileHandler(
-        _API_LOG_FILE, when="midnight", backupCount=14, encoding="utf-8",
-    )
-    _fh.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)s %(name)s %(message)s",
-    ))
-    _fh.setLevel(logging.INFO)
-    _app_logger.addHandler(_fh)
-
-logger = logging.getLogger(__name__)
+from app.config import API_HOST, API_PORT
 
 
 @asynccontextmanager
@@ -42,8 +20,8 @@ async def _lifespan(app: FastAPI):
         try:
             from app.rag.reranker import warmup as _rerank_warmup
             _rerank_warmup()
-        except Exception:
-            logger.exception("Reranker warmup failed")
+        except Exception as e:
+            print(f"Reranker warmup failed: {e}")
 
         # ── 2. Tạo 24 Qdrant collections (12 domain × docs + videos) ─────────
         # Idempotent: chỉ tạo collection nếu chưa tồn tại, không xóa data cũ.
@@ -58,16 +36,16 @@ async def _lifespan(app: FastAPI):
                 vector_name=QDRANT_VECTOR_NAME,
             )
             registry.ensure_all()   # tạo đủ 24 collections, log tên từng cái
-        except Exception:
-            logger.exception("QdrantRegistry.ensure_all failed")
+        except Exception as e:
+            print(f"QdrantRegistry.ensure_all failed: {e}")
 
         # ── 3. Ensure payload indexes cho ttt_memory ──────────────────────────
         # (collection memory dùng filter user_id + session_id → cần keyword index)
         try:
             from app.api.chat import _get_conv_memory
             _get_conv_memory().ensure_indexes()
-        except Exception:
-            logger.exception("conv_memory ensure_indexes failed")
+        except Exception as e:
+            print(f"conv_memory ensure_indexes failed: {e}")
 
         # ── 4. Inject registry vào chain (thay thế qdrant_docs / qdrant_videos) ─
         # Chain sẽ dùng registry để route search đúng collection theo domain.
@@ -83,14 +61,14 @@ async def _lifespan(app: FastAPI):
                 vector_size=VOYAGE_DIM,
                 vector_name=QDRANT_VECTOR_NAME,
             )
-            logger.info("chain.retriever.registry injected: 24 collections ready")
-        except Exception:
-            logger.exception("chain registry inject failed")
+            print("chain.retriever.registry injected: 24 collections ready")
+        except Exception as e:
+            print(f"chain registry inject failed: {e}")
 
     try:
         await asyncio.to_thread(_warmup)
-    except Exception:
-        logger.exception("Warmup task failed")
+    except Exception as e:
+        print(f"Warmup task failed: {e}")
     yield
 
 
@@ -109,18 +87,12 @@ async def log_request_duration(request: Request, call_next):
     start = time.perf_counter()
     try:
         response = await call_next(request)
-    except Exception:
+    except Exception as e:
         elapsed = time.perf_counter() - start
-        logger.exception(
-            "API %s %s failed after %.3fs",
-            request.method, request.url.path, elapsed,
-        )
+        print(f"API {request.method} {request.url.path} failed after {elapsed:.3f}s: {e}")
         raise
     elapsed = time.perf_counter() - start
-    logger.info(
-        "API %s %s → %d in %.3fs",
-        request.method, request.url.path, response.status_code, elapsed,
-    )
+    print(f"API {request.method} {request.url.path} → {response.status_code} in {elapsed:.3f}s")
     response.headers["X-Process-Time"] = f"{elapsed:.3f}"
     return response
 

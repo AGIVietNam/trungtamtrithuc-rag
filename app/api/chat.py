@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import time
 from collections.abc import Iterator
 
@@ -26,8 +25,6 @@ from app.core.conv_summarizer import summarize as summarize_conv
 from app.rag.retriever import Retriever
 from app.rag.reranker import CrossEncoderReranker
 from app.rag.chain import RAGChain
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -87,10 +84,7 @@ def _get_chain() -> RAGChain:
         url=QDRANT_VMEDIA_URL, vmedia_api_key=QDRANT_VMEDIA_API_KEY,
         collections=VMEDIA_COLLECTIONS,
     )
-    logger.info(
-        "_get_chain init: qdrant_url=%s registry_collections=%d vmedia_collections=%d",
-        QDRANT_URL[:50], len(registry.collection_names()), len(VMEDIA_COLLECTIONS),
-    )
+    print(f"_get_chain init: qdrant_url={QDRANT_URL[:50]} registry_collections={len(registry.collection_names())} vmedia_collections={len(VMEDIA_COLLECTIONS)}")
 
     retriever = Retriever(
         voyage=voyage,
@@ -131,20 +125,14 @@ def _post_turn_memory_update(
                 new_summary = summarize_conv(_get_claude(), old_summary, rolled)
                 if new_summary and new_summary != old_summary:
                     memory.set_summary(session_id, new_summary)
-                    logger.info(
-                        "session %s summary updated (rolled %d msgs, len=%d)",
-                        session_id, len(rolled), len(new_summary),
-                    )
-            except Exception:
-                logger.error("rolling summary failed", exc_info=True)
+                    print(f"session {session_id} summary updated (rolled {len(rolled)} msgs, len={len(new_summary)})")
+            except Exception as e:
+                print(f"rolling summary failed: {e}")
 
         # Vector recall upsert — skip pair khi bot trả "không tìm thấy"
         # để tránh feedback loop ô nhiễm memory.
         if _is_no_info_answer(assistant_msg):
-            logger.info(
-                "conv_memory skip upsert (no-info answer) session=%s turn=%d",
-                session_id, turn_idx,
-            )
+            print(f"conv_memory skip upsert (no-info answer) session={session_id} turn={turn_idx}")
         else:
             try:
                 _get_conv_memory().upsert_pair(
@@ -155,10 +143,10 @@ def _post_turn_memory_update(
                     assistant_text=assistant_msg,
                     domain=domain or "mac_dinh",
                 )
-            except Exception:
-                logger.error("conv_memory upsert failed", exc_info=True)
-    except Exception:
-        logger.error("_post_turn_memory_update failed", exc_info=True)
+            except Exception as e:
+                print(f"conv_memory upsert failed: {e}")
+    except Exception as e:
+        print(f"_post_turn_memory_update failed: {e}")
 
 
 @router.post("/", response_model=ChatResponse)
@@ -185,14 +173,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks) -> ChatR
             conv_memory=_get_conv_memory(),
         )
     except Exception as exc:
-        logger.exception("RAG chain error: %s", exc)
-        logger.info(
-            "POST /api/chat FAILED (session=%s): init=%.3fs mem=%.3fs chain=%.3fs total=%.3fs",
-            request.session_id,
-            t_chain - t0, t_mem - t_chain,
-            time.perf_counter() - t_mem,
-            time.perf_counter() - t0,
-        )
+        print(f"RAG chain error: {exc}")
+        print(f"POST /api/chat FAILED (session={request.session_id}): init={t_chain - t0:.3f}s mem={t_mem - t_chain:.3f}s chain={time.perf_counter() - t_mem:.3f}s total={time.perf_counter() - t0:.3f}s")
         return ChatResponse(
             answer=f"Lỗi xử lý: {exc}",
             sources=[],
@@ -210,16 +192,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks) -> ChatR
         domain=request.domain or "mac_dinh",
     )
     t_end = time.perf_counter()
-    logger.info(
-        "POST /api/chat steps (session=%s): init=%.3fs mem=%.3fs chain=%.3fs schedule_bg=%.3fs total=%.3fs (refused=%s)",
-        request.session_id,
-        t_chain - t0,
-        t_mem - t_chain,
-        t_chain_done - t_mem,
-        t_end - t_chain_done,
-        t_end - t0,
-        result.get("refused", False),
-    )
+    print(f"POST /api/chat steps (session={request.session_id}): init={t_chain - t0:.3f}s mem={t_mem - t_chain:.3f}s chain={t_chain_done - t_mem:.3f}s schedule_bg={t_end - t_chain_done:.3f}s total={t_end - t0:.3f}s (refused={result.get('refused', False)})")
 
     return ChatResponse(
         answer=result["answer"],
@@ -269,30 +242,15 @@ async def chat_stream(
                     final_answer = event.get("answer", "") or ""
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:
-            logger.exception("RAG stream error: %s", exc)
-            logger.info(
-                "POST /api/chat/stream FAILED (session=%s): init=%.3fs mem=%.3fs stream=%.3fs total=%.3fs",
-                request.session_id,
-                t_chain - t0, t_mem - t_chain,
-                time.perf_counter() - t_mem,
-                time.perf_counter() - t0,
-            )
+            print(f"RAG stream error: {exc}")
+            print(f"POST /api/chat/stream FAILED (session={request.session_id}): init={t_chain - t0:.3f}s mem={t_mem - t_chain:.3f}s stream={time.perf_counter() - t_mem:.3f}s total={time.perf_counter() - t0:.3f}s")
             err = {"type": "error", "message": str(exc)}
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
             return
 
         t_stream_end = time.perf_counter()
         ttfb = (t_first_delta - t_stream_start) if t_first_delta else None
-        logger.info(
-            "POST /api/chat/stream steps (session=%s): init=%.3fs mem=%.3fs ttfb=%s stream=%.3fs total=%.3fs (answer=%d chars)",
-            request.session_id,
-            t_chain - t0,
-            t_mem - t_chain,
-            f"{ttfb:.3f}s" if ttfb is not None else "n/a",
-            t_stream_end - t_stream_start,
-            t_stream_end - t0,
-            len(final_answer),
-        )
+        print(f"POST /api/chat/stream steps (session={request.session_id}): init={t_chain - t0:.3f}s mem={t_mem - t_chain:.3f}s ttfb={f'{ttfb:.3f}s' if ttfb is not None else 'n/a'} stream={t_stream_end - t_stream_start:.3f}s total={t_stream_end - t0:.3f}s (answer={len(final_answer)} chars)")
 
         if final_answer:
             background_tasks.add_task(

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import logging
 import uuid
 from typing import Any
 
 import requests
-
-logger = logging.getLogger(__name__)
 
 UPSERT_BATCH = 64
 
@@ -76,20 +73,24 @@ class QdrantStore:
             timeout=60,
         )
         if not resp.ok:
-            logger.error("qdrant %s %s -> %s: %s", method, path, resp.status_code, resp.text)
+            print(f"qdrant {method} {path} -> {resp.status_code}: {resp.text}")
         resp.raise_for_status()
         return resp.json() if resp.text else {}
 
     def ensure_collection(self) -> None:
-        r = requests.get(
-            f"{self.url}/collections/{self.collection}",
-            headers=self._headers(),
-            timeout=30,
-        )
-        if r.status_code == 200:
-            return
-        if r.status_code != 404:
-            r.raise_for_status()
+        try:
+            r = requests.get(
+                f"{self.url}/collections/{self.collection}",
+                headers=self._headers(),
+                timeout=30,
+            )
+            if r.status_code == 200:
+                return
+            if r.status_code != 404:
+                r.raise_for_status()
+        except Exception as e:
+            print(f"FAILED to check collection '{self.collection}' at {self.url}: {e}")
+            raise
         body = {
             "vectors": {
                 self.vector_name: {
@@ -102,7 +103,7 @@ class QdrantStore:
             }
         }
         self._req("PUT", f"/collections/{self.collection}", body)
-        logger.info("qdrant collection '%s' created", self.collection)
+        print(f"qdrant collection '{self.collection}' created")
 
     def ensure_payload_indexes(self, fields: list[str]) -> None:
         """Tạo payload keyword index (idempotent). Không raise khi collection chưa tồn tại."""
@@ -113,12 +114,9 @@ class QdrantStore:
                     f"/collections/{self.collection}/index?wait=true",
                     {"field_name": field, "field_schema": "keyword"},
                 )
-                logger.info("qdrant ensured payload index: %s.%s", self.collection, field)
+                print(f"qdrant ensured payload index: {self.collection}.{field}")
             except Exception as exc:
-                logger.warning(
-                    "qdrant ensure_payload_indexes(%s.%s) skipped: %s",
-                    self.collection, field, exc,
-                )
+                print(f"qdrant ensure_payload_indexes({self.collection}.{field}) skipped: {exc}")
 
     def upsert(self, points: list[dict], wait: bool = True) -> None:
         for i in range(0, len(points), UPSERT_BATCH):
@@ -136,7 +134,7 @@ class QdrantStore:
                 f"/collections/{self.collection}/points?wait={str(wait).lower()}",
                 {"points": formatted},
             )
-            logger.info("qdrant upserted %d points to '%s'", len(batch), self.collection)
+            print(f"qdrant upserted {len(batch)} points to '{self.collection}'")
 
     def search(
         self,
@@ -200,7 +198,7 @@ class QdrantRegistry:
         vector_size: int = 1024,
         vector_name: str = "",
     ):
-        logger.info("Initializing QdrantRegistry for cluster: %s", url)
+        print(f"Initializing QdrantRegistry for cluster: {url}")
         self.url = url
         self.api_key = api_key
         self._stores: dict[str, QdrantStore] = {}
@@ -268,14 +266,12 @@ class QdrantRegistry:
             try:
                 store.ensure_collection()
                 created += 1
-            except Exception:
-                logger.exception("ensure_all: failed for collection '%s'", store.collection)
+            except Exception as e:
+                print(f"ensure_all: FAILED for collection '{store.collection}': {e}")
 
-        logger.info(
-            "QdrantRegistry.ensure_all: %d/%d collections ensured. Names: %s",
-            created,
-            len(self._stores),
-            ", ".join(self.collection_names()),
+        print(
+            f"QdrantRegistry.ensure_all: {created}/{len(self._stores)} collections ensured. "
+            f"Names: {', '.join(self.collection_names())}"
         )
 
 
@@ -294,7 +290,7 @@ class VMediaReadOnlyStore:
         collections: list[str],
         vector_name: str = "",
     ):
-        logger.info("Initializing VMediaReadOnlyStore for cluster: %s", url)
+        print(f"Initializing VMediaReadOnlyStore for cluster: {url}")
         self.url = url.rstrip("/")
         self.api_key = vmedia_api_key
         self.collections = collections
@@ -338,7 +334,7 @@ class VMediaReadOnlyStore:
                         hit["_vmedia_collection"] = col
                         all_results.append(hit)
             except Exception as exc:
-                logger.warning("vmedia search '%s' failed: %s", col, exc)
+                print(f"vmedia search '{col}' failed: {exc}")
 
         all_results.sort(key=lambda h: h.get("score", 0), reverse=True)
         return all_results[:limit]

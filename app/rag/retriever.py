@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import concurrent.futures
-import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.voyage_embed import VoyageEmbedder
 from app.core.qdrant_store import QdrantStore, VMediaReadOnlyStore, QdrantRegistry
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -42,11 +39,7 @@ class Retriever:
         col = getattr(store, "collection", "vmedia")
         try:
             hits = store.search(query_vec, limit=top_k, filter=qdrant_filter)
-            logger.info(
-                "retriever _search_one %s/%s: %d hits (filter=%s)",
-                col, source_type, len(hits),
-                bool(qdrant_filter),
-            )
+            print(f"retriever _search_one {col}/{source_type}: {len(hits)} hits (filter={bool(qdrant_filter)})")
             return [
                 Hit(
                     text=h.get("payload", {}).get("text", ""),
@@ -57,11 +50,10 @@ class Retriever:
                 )
                 for h in hits
             ]
-        except Exception:
-            logger.exception(
-                "retriever _search_one FAILED: collection=%s source_type=%s "
-                "filter=%s",
-                col, source_type, qdrant_filter,
+        except Exception as e:
+            print(
+                f"retriever _search_one FAILED: collection={col} source_type={source_type} "
+                f"filter={qdrant_filter}: {e}"
             )
             return []
 
@@ -79,19 +71,12 @@ class Retriever:
             query_vec = self.voyage.embed_query(query)
 
         # ── Chọn stores theo domain ──────────────────────────────────────────
-        # domain truyền vào từ chat.py thường là persona key
-        # ("bim", "công nghệ thông tin", ...). get_by_persona chấp nhận cả
-        # persona key lẫn slug ("cong_nghe"), nên an toàn 2 chiều.
-        # domain=None → nhánh fanout (chat chung, user không chọn lĩnh vực).
         if domain:
             try:
                 doc_stores  = [self.registry.get_by_persona(domain, "docs")]   if "documents" in sources else []
                 vid_stores  = [self.registry.get_by_persona(domain, "videos")] if "videos"    in sources else []
             except KeyError:
-                logger.warning(
-                    "retriever: domain=%r không map được — fallback fanout 20 collections",
-                    domain,
-                )
+                print(f"retriever: domain={domain!r} không map được — fallback fanout 20 collections")
                 doc_stores  = self.registry.all_docs_stores()   if "documents" in sources else []
                 vid_stores  = self.registry.all_videos_stores() if "videos"    in sources else []
         else:
@@ -99,7 +84,7 @@ class Retriever:
             doc_stores  = self.registry.all_docs_stores()   if "documents" in sources else []
             vid_stores  = self.registry.all_videos_stores() if "videos"    in sources else []
 
-        # ── Build tasks — không còn qdrant_filter vì đã routing bằng collection ──
+        # ── Build tasks ──
         tasks: list[tuple] = []
         for store in doc_stores:
             tasks.append((store, "document", query_vec, top_k, None))
@@ -126,9 +111,6 @@ class Retriever:
                 deduped.append(hit)
 
         result = deduped[:top_k]
-        logger.info(
-            "retrieve: domain=%r tasks=%d raw=%d deduped=%d returned=%d top_score=%.4f",
-            domain, len(tasks), len(all_hits), len(deduped), len(result),
-            result[0].score if result else 0.0,
-        )
+        top_score = result[0].score if result else 0.0
+        print(f"retrieve: domain={domain!r} tasks={len(tasks)} raw={len(all_hits)} deduped={len(deduped)} returned={len(result)} top_score={top_score:.4f}")
         return result

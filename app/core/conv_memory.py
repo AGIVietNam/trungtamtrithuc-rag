@@ -15,7 +15,6 @@ ra ngoài để không làm fail chain chat.
 from __future__ import annotations
 
 import hashlib
-import logging
 import re
 import time
 import uuid
@@ -37,8 +36,6 @@ from app.config import (
     VOYAGE_DIM,
 )
 from app.core.voyage_embed import VoyageEmbedder
-
-logger = logging.getLogger(__name__)
 
 MAX_PAIR_CHARS = 3000  # ~800 tokens, truncate trước khi embed
 
@@ -125,7 +122,7 @@ class ConversationMemory:
     """
 
     def __init__(self, embedder: VoyageEmbedder | None = None):
-        logger.info("Initializing ConversationMemory for cluster: %s", QDRANT_URL)
+        print(f"Initializing ConversationMemory for cluster: {QDRANT_URL}")
         self.url = QDRANT_URL.rstrip("/")
         self.api_key = QDRANT_API_KEY
         self.collection = CONV_COLLECTION
@@ -181,8 +178,8 @@ class ConversationMemory:
             )
             hits = result.get("result", [])
             return hits[0] if hits else None
-        except Exception:
-            logger.error("conv_memory near-dup search failed", exc_info=True)
+        except Exception as e:
+            print(f"conv_memory near-dup search failed: {e}")
             return None
 
     def _touch_last_seen(self, point_id: str | int, now: int) -> None:
@@ -194,8 +191,8 @@ class ConversationMemory:
                 f"/collections/{self.collection}/points/payload?wait=false",
                 {"payload": {"last_seen_at": now}, "points": [point_id]},
             )
-        except Exception:
-            logger.error("conv_memory touch last_seen_at failed", exc_info=True)
+        except Exception as e:
+            print(f"conv_memory touch last_seen_at failed: {e}")
 
     def _headers(self) -> dict:
         return {"api-key": self.api_key, "Content-Type": "application/json"}
@@ -206,7 +203,7 @@ class ConversationMemory:
             headers=self._headers(), json=body, timeout=timeout,
         )
         if not resp.ok:
-            logger.error("qdrant %s %s -> %s %s", method, path, resp.status_code, resp.text[:300])
+            print(f"qdrant {method} {path} -> {resp.status_code} {resp.text[:300]}")
         resp.raise_for_status()
         return resp.json() if resp.text else {}
 
@@ -245,12 +242,9 @@ class ConversationMemory:
                 }
             }
             self._req("PUT", f"/collections/{self.collection}", body)
-            logger.info("conv_memory collection '%s' created", self.collection)
-        except Exception:
-            logger.exception(
-                "conv_memory ensure_collection failed — "
-                "upsert/recall sẽ bị bỏ qua tới khi collection tồn tại",
-            )
+            print(f"conv_memory collection '{self.collection}' created")
+        except Exception as e:
+            print(f"FAILED to ensure conv_memory collection '{self.collection}' at {self.url}: {e}")
 
     def ensure_indexes(self) -> None:
         """Tạo collection + payload index cho user_id + session_id (idempotent).
@@ -268,11 +262,10 @@ class ConversationMemory:
                     f"/collections/{self.collection}/index?wait=true",
                     {"field_name": field, "field_schema": "keyword"},
                 )
-                logger.info("conv_memory ensured payload index: %s", field)
+                print(f"conv_memory ensured payload index: {field}")
             except Exception as exc:
-                logger.warning(
-                    "conv_memory ensure_indexes(%s) skipped: %s", field, exc
-                )
+                print(f"FAILED to ensure conv_memory index for field '{field}': {exc}")
+                print(f"conv_memory ensure_indexes({field}) skipped: {exc}")
 
     @staticmethod
     def should_skip_recall(query: str) -> bool:
@@ -313,19 +306,13 @@ class ConversationMemory:
             # Guard 1 — heuristic filter (zero-cost, chặn câu xã giao)
             worth, reason = _is_worth_storing(user_text, assistant_text)
             if not worth:
-                logger.info(
-                    "conv_memory skip upsert (heuristic): user=%s turn=%d — %s",
-                    user_id, turn_idx, reason,
-                )
+                print(f"conv_memory skip upsert (heuristic): user={user_id} turn={turn_idx} — {reason}")
                 return False
 
             # Guard 2 — exact hash dup (zero-cost, chặn trước khi tốn embed)
             pair_hash = _hash_pair(user_text, assistant_text)
             if self._hash_seen(user_id, pair_hash):
-                logger.info(
-                    "conv_memory skip upsert (hash dup): user=%s turn=%d hash=%s",
-                    user_id, turn_idx, pair_hash[:8],
-                )
+                print(f"conv_memory skip upsert (hash dup): user={user_id} turn={turn_idx} hash={pair_hash[:8]}")
                 return False
 
             # Embed 1 lần, reuse cho cả dedup search và upsert
@@ -337,11 +324,7 @@ class ConversationMemory:
             if near is not None:
                 near_id = near.get("id")
                 self._touch_last_seen(near_id, now)
-                logger.info(
-                    "conv_memory skip upsert (semantic dup): user=%s turn=%d "
-                    "score=%.3f existing=%s",
-                    user_id, turn_idx, near.get("score", 0.0), near_id,
-                )
+                print(f"conv_memory skip upsert (semantic dup): user={user_id} turn={turn_idx} score={near.get('score', 0.0):.3f} existing={near_id}")
                 return False
 
             # Thực sự ghi point mới
@@ -370,13 +353,10 @@ class ConversationMemory:
                 f"/collections/{self.collection}/points?wait=false",
                 {"points": [point]},
             )
-            logger.info(
-                "conv_memory upsert: user=%s session=%s turn=%d len=%d",
-                user_id, session_id, turn_idx, len(pair_text),
-            )
+            print(f"conv_memory upsert: user={user_id} session={session_id} turn={turn_idx} len={len(pair_text)}")
             return True
-        except Exception:
-            logger.error("conv_memory upsert failed", exc_info=True)
+        except Exception as e:
+            print(f"conv_memory upsert failed: {e}")
             return False
 
     # ---------------------------------------------------------------- retrieve
@@ -455,13 +435,10 @@ class ConversationMemory:
 
             # Sort theo created_at tăng dần (cũ → mới) để LLM đọc dễ ưu tiên mới
             out.sort(key=lambda p: p.get("created_at", 0))
-            logger.info(
-                "conv_memory retrieve: user=%s query_len=%d → %d hits (threshold=%.2f)",
-                user_id, len(query), len(out), threshold,
-            )
+            print(f"conv_memory retrieve: user={user_id} query_len={len(query)} → {len(out)} hits (threshold={threshold:.2f})")
             return out
-        except Exception:
-            logger.error("conv_memory retrieve failed", exc_info=True)
+        except Exception as e:
+            print(f"conv_memory retrieve failed: {e}")
             return []
 
     # ------------------------------------------------------------------ delete
@@ -480,10 +457,10 @@ class ConversationMemory:
                     }
                 },
             )
-            logger.info("conv_memory deleted all pairs for user=%s", user_id)
+            print(f"conv_memory deleted all pairs for user={user_id}")
             return 1
-        except Exception:
-            logger.error("conv_memory delete_by_user failed", exc_info=True)
+        except Exception as e:
+            print(f"conv_memory delete_by_user failed: {e}")
             return 0
 
     def delete_by_session(self, session_id: str) -> int:
@@ -499,8 +476,8 @@ class ConversationMemory:
                     }
                 },
             )
-            logger.info("conv_memory deleted pairs for session=%s", session_id)
+            print(f"conv_memory deleted pairs for session={session_id}")
             return 1
-        except Exception:
-            logger.error("conv_memory delete_by_session failed", exc_info=True)
+        except Exception as e:
+            print(f"conv_memory delete_by_session failed: {e}")
             return 0
