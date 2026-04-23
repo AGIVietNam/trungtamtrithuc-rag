@@ -10,23 +10,24 @@ logger = logging.getLogger(__name__)
 
 UPSERT_BATCH = 64
 
-# ── 10 domain slugs (ASCII, dùng làm collection name suffix) ─────────────────
-# Upload form bắt buộc chọn 1 trong 10 domain → không cần "tong_quat" catch-all.
-# Chat chung (user không chọn domain) dùng fanout toàn bộ 10 collection.
+# ── 10 domain slugs (ASCII) — khớp với NestJS Categories seeder ─────────────
+# Source: knowledge_center_backend/src/database/seeds/categories.seeder.ts
+# Upload form bắt buộc chọn 1 trong 10 slug. Chat chung fanout toàn bộ.
 DOMAINS: list[str] = [
-    "bim",
-    "mep",
     "marketing",
+    "mep",
+    "bim",
     "phap_ly",
     "san_xuat",
-    "cong_nghe",
+    "cntt",
     "nhan_su",
     "tai_chinh",
     "kinh_doanh",
     "thiet_ke",
 ]
 
-# Map từ key DOMAIN_PERSONAS (prompt_builder.py) → domain slug.
+# Legacy persona key (Vietnamese có dấu) → slug. Dùng cho backward compat khi
+# client cũ vẫn gửi persona VN ("công nghệ thông tin") thay vì slug ("cntt").
 # Không có entry "mặc định" vì không có collection tương ứng — chat chung đi
 # qua nhánh fanout trong Retriever (domain=None).
 PERSONA_TO_DOMAIN: dict[str, str] = {
@@ -35,7 +36,7 @@ PERSONA_TO_DOMAIN: dict[str, str] = {
     "marketing":             "marketing",
     "pháp lý":               "phap_ly",
     "sản xuất":              "san_xuat",
-    "công nghệ thông tin":   "cong_nghe",
+    "công nghệ thông tin":   "cntt",
     "nhân sự":               "nhan_su",
     "tài chính":             "tai_chinh",
     "kinh doanh":            "kinh_doanh",
@@ -176,7 +177,7 @@ class QdrantRegistry:
 
     Ví dụ:
         registry.get("bim", "docs")          → store cho tdi_docs_bim
-        registry.get("cong_nghe", "videos")  → store cho tdi_videos_cong_nghe
+        registry.get("cntt", "videos")       → store cho tdi_videos_cntt
         registry.get_by_persona("công nghệ thông tin", "docs")  → tương tự trên
     """
 
@@ -231,7 +232,7 @@ class QdrantRegistry:
             registry.get_by_persona("công nghệ thông tin", "docs")
             registry.get_by_persona("bim", "videos")
 
-        Nhận cả persona key ("công nghệ thông tin") lẫn slug ("cong_nghe").
+        Nhận cả persona key ("công nghệ thông tin") lẫn slug ("cntt").
         Raise KeyError nếu không nhận ra — chat chung phải đi qua Retriever
         với domain=None, không được rơi vào hàm này.
         """

@@ -153,7 +153,7 @@ def _post_turn_memory_update(
                     turn_idx=turn_idx,
                     user_text=user_msg,
                     assistant_text=assistant_msg,
-                    domain=domain or "mặc định",
+                    domain=domain or "mac_dinh",
                 )
             except Exception:
                 logger.error("conv_memory upsert failed", exc_info=True)
@@ -171,7 +171,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks) -> ChatR
     summary = memory.get_summary(request.session_id)
     t_mem = time.perf_counter()
 
-    domain = request.domain if request.domain and request.domain not in ("general", "mặc định") else None
+    domain = request.domain if request.domain and request.domain not in ("general", "mặc định", "mac_dinh") else None
     effective_user_id = (request.user_id or "").strip() or request.session_id
 
     try:
@@ -207,7 +207,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks) -> ChatR
         user_id=effective_user_id,
         user_msg=request.message,
         assistant_msg=result["answer"],
-        domain=request.domain or "mặc định",
+        domain=request.domain or "mac_dinh",
     )
     t_end = time.perf_counter()
     logger.info(
@@ -243,7 +243,7 @@ async def chat_stream(
 
     domain = (
         request.domain
-        if request.domain and request.domain not in ("general", "mặc định")
+        if request.domain and request.domain not in ("general", "mặc định", "mac_dinh")
         else None
     )
     effective_user_id = (request.user_id or "").strip() or request.session_id
@@ -301,7 +301,7 @@ async def chat_stream(
                 user_id=effective_user_id,
                 user_msg=request.message,
                 assistant_msg=final_answer,
-                domain=request.domain or "mặc định",
+                domain=request.domain or "mac_dinh",
             )
 
     return StreamingResponse(

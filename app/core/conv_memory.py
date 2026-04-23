@@ -297,7 +297,7 @@ class ConversationMemory:
         turn_idx: int,
         user_text: str,
         assistant_text: str,
-        domain: str = "mặc định",
+        domain: str = "mac_dinh",
     ) -> bool:
         """Embed pair và upsert với 3 lớp chống bloat.
 
@@ -355,7 +355,7 @@ class ConversationMemory:
                 "text": pair_text,
                 "created_at": now,
                 "last_seen_at": now,
-                "domain": domain or "mặc định",
+                "domain": domain or "mac_dinh",
                 "kind": "conversation_pair",
             }
 

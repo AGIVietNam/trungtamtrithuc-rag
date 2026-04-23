@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, Form, UploadFile
 from app.schemas import IngestResponse
 from app.ingestion.doc_pipeline import ingest_document
 from app.ingestion.metadata_generator import generate_document_metadata
-from app.core.qdrant_store import PERSONA_TO_DOMAIN
+from app.core.qdrant_store import DOMAINS, PERSONA_TO_DOMAIN
 
 logger = logging.getLogger(__name__)
 
@@ -21,18 +21,23 @@ router = APIRouter()
 # không ensure ở module import nữa để tránh ghi đè thứ tự startup.
 
 
-VALID_DOMAINS: frozenset[str] = frozenset(PERSONA_TO_DOMAIN.keys())
+# Primary = slug (khớp NestJS). Legacy = persona VN map về slug.
+VALID_SLUGS: frozenset[str] = frozenset(DOMAINS)
+VALID_PERSONAS: frozenset[str] = frozenset(PERSONA_TO_DOMAIN.keys())
 
 
 def _validate_domain(domain: str) -> str | None:
-    """Trả về message lỗi nếu domain không hợp lệ, None nếu OK."""
+    """Trả message lỗi nếu domain không hợp lệ, None nếu OK.
+
+    Nhận slug ("thiet_ke") hoặc persona VN ("thiết kế") — cả hai đều valid.
+    """
     d = (domain or "").strip()
     if not d:
         return "Lĩnh vực (domain) là bắt buộc — vui lòng chọn lĩnh vực trước khi upload."
-    if d not in VALID_DOMAINS:
+    if d not in VALID_SLUGS and d not in VALID_PERSONAS:
         return (
             f"Lĩnh vực '{d}' không hợp lệ. "
-            f"Chọn 1 trong: {sorted(VALID_DOMAINS)}"
+            f"Chọn 1 trong: {sorted(VALID_SLUGS)}"
         )
     return None
 

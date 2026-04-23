@@ -41,7 +41,7 @@ from app.rag.retriever import Hit
 # nằm chung trong _BASE_RULES — không lặp lại trong từng persona (Claude 4.7
 # literal-follow thấy rules một lần là đủ; nhân bản gây noise và tốn token cache).
 DOMAIN_PERSONAS: dict[str, str] = {
-    "mặc định": (
+    "mac_dinh": (
         "Bạn là Trợ lý Tri thức của TDI Group. Trả lời các câu hỏi về dự án, "
         "quy trình, tài liệu nội bộ TDI.\n\n"
         "PHẠM VI:\n"
@@ -93,7 +93,7 @@ DOMAIN_PERSONAS: dict[str, str] = {
         "- Customer journey, không dịch là 'hành trình mua hàng'.\n"
         "- Lead phải kèm SQL/MQL khi có, không gọi chung là 'khách tiềm năng'."
     ),
-    "pháp lý": (
+    "phap_ly": (
         "Bạn là Trưởng phòng Pháp chế tại TDI Group với 12+ năm kinh nghiệm luật "
         "xây dựng, đầu tư, doanh nghiệp và hợp đồng thi công.\n\n"
         "PHẠM VI:\n"
@@ -109,7 +109,7 @@ DOMAIN_PERSONAS: dict[str, str] = {
         "ĐẶC THÙ: luôn trích dẫn Điều X, Khoản Y, Điểm Z và tên văn bản gốc "
         "khi câu trả lời dựa trên văn bản pháp quy."
     ),
-    "sản xuất": (
+    "san_xuat": (
         "Bạn là Giám đốc Sản xuất tại TDI Group với 12+ năm kinh nghiệm vận hành "
         "nhà máy, Lean Manufacturing và cải tiến năng suất.\n\n"
         "PHẠM VI:\n"
@@ -122,7 +122,7 @@ DOMAIN_PERSONAS: dict[str, str] = {
         "- Kaizen, không dịch là 'cải tiến' chung chung.\n"
         "- Yield rate, không dịch là 'tỷ lệ đạt'."
     ),
-    "công nghệ thông tin": (
+    "cntt": (
         "Bạn là Giám đốc CNTT tại TDI Group với 12+ năm kinh nghiệm hạ tầng, bảo mật "
         "và phát triển phần mềm doanh nghiệp.\n\n"
         "PHẠM VI:\n"
@@ -135,7 +135,7 @@ DOMAIN_PERSONAS: dict[str, str] = {
         "- Backup ≠ Disaster Recovery (hai khái niệm khác nhau).\n"
         "- Endpoint, không dịch là 'máy trạm'."
     ),
-    "nhân sự": (
+    "nhan_su": (
         "Bạn là Giám đốc Nhân sự (CHRO) tại TDI Group với 12+ năm kinh nghiệm "
         "tuyển dụng, C&B, đào tạo và quan hệ lao động.\n\n"
         "PHẠM VI:\n"
@@ -149,7 +149,7 @@ DOMAIN_PERSONAS: dict[str, str] = {
         "- Thử việc, không gọi là 'học việc'.\n"
         "- BHXH – BHYT – BHTN ghi đầy đủ, không gộp chung là 'bảo hiểm'."
     ),
-    "tài chính": (
+    "tai_chinh": (
         "Bạn là Giám đốc Tài chính (CFO) tại TDI Group với 12+ năm kinh nghiệm "
         "kế toán, quản trị dòng tiền, phân tích đầu tư và kiểm soát nội bộ.\n\n"
         "PHẠM VI:\n"
@@ -163,7 +163,7 @@ DOMAIN_PERSONAS: dict[str, str] = {
         "- NPV (Net Present Value), không dịch là 'giá trị hiện tại' đơn thuần.\n"
         "- VAS (Vietnamese Accounting Standards), không gọi là 'chuẩn mực kế toán' chung chung."
     ),
-    "kinh doanh": (
+    "kinh_doanh": (
         "Bạn là Giám đốc Kinh doanh tại TDI Group với 12+ năm kinh nghiệm bán hàng "
         "B2B, phát triển đối tác và quản trị kênh phân phối ngành xây dựng – bất động sản.\n\n"
         "PHẠM VI:\n"
@@ -177,7 +177,7 @@ DOMAIN_PERSONAS: dict[str, str] = {
         "- Closing rate, không dịch chung chung là 'tỷ lệ chốt'.\n"
         "- Forecast, không dịch là 'dự báo miệng'."
     ),
-    "thiết kế": (
+    "thiet_ke": (
         "Bạn là Giám đốc Thiết kế tại TDI Group với 12+ năm kinh nghiệm kiến trúc, "
         "quy hoạch và thiết kế nội thất cho dự án dân dụng – thương mại.\n\n"
         "PHẠM VI:\n"
@@ -300,7 +300,11 @@ def build_system_prompt(expert_domain: str | None = None) -> str:
     documents/conv_block ở đây — chúng động, phải đi vào user message qua
     ``build_user_turn`` để tránh cache write premium mỗi turn.
     """
-    domain = (expert_domain or "mặc định").lower().strip()
+    domain = (expert_domain or "mac_dinh").lower().strip()
+    # Fallback: chấp nhận persona VN cũ (backward compat) qua PERSONA_TO_DOMAIN.
+    from app.core.qdrant_store import PERSONA_TO_DOMAIN
+    if domain not in DOMAIN_PERSONAS and domain in PERSONA_TO_DOMAIN:
+        domain = PERSONA_TO_DOMAIN[domain]
     persona = DOMAIN_PERSONAS.get(
         domain,
         f"Bạn là chuyên gia về '{expert_domain}'. Trả lời tiếng Việt chính xác, có nguồn rõ ràng.",
