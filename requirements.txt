@@ -23,8 +23,10 @@ numpy
 # PyTorch: trên Linux mặc định pip sẽ kéo bản CUDA (auto dùng GPU NVIDIA nếu có).
 # Trên macOS mặc định có MPS (GPU Apple Silicon).
 # CPU fallback khi không có GPU. Override: RERANKER_DEVICE=cpu/cuda/mps
---extra-index-url https://download.pytorch.org/whl/cu126
-torch==2.11.0+cu126
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+torchaudio==2.5.1+cu124
 sentence-transformers
 pytest-asyncio
 boto3
