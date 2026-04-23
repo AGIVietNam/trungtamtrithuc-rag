@@ -42,8 +42,6 @@ QDRANT_VMEDIA_URL: str = _opt("QDRANT_VMEDIA_URL", "https://dd2f49bd-a20a-49b6-a
 QDRANT_VMEDIA_API_KEY: str = _opt("QDRANT_VMEDIA_API_KEY", "")
 
 # --- Collections ---
-COLLECTION_DOCS: str = _opt("COLLECTION_DOCS", "ttt_documents")
-COLLECTION_VIDEOS: str = _opt("COLLECTION_VIDEOS", "ttt_videos")
 VMEDIA_COLLECTIONS: list[str] = _opt("VMEDIA_COLLECTIONS", "vmedia_content,vmedia_design,vmedia_digital,vmedia_documents,vmedia_fonts,vmedia_image,vmedia_media,vmedia_qa,vmedia_ttnb").split(",")
 
 

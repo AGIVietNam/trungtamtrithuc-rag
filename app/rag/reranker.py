@@ -26,6 +26,13 @@ def _detect_device() -> str:
             return "mps"
     except Exception:
         pass
+
+    from app import config
+    if config.REQUIRE_GPU:
+        raise RuntimeError(
+            "REQUIRE_GPU=1 but no CUDA/MPS device found! "
+            "Please check your server GPU drivers or set REQUIRE_GPU=0."
+        )
     return "cpu"
 
 
@@ -63,7 +70,7 @@ class CrossEncoderReranker:
     Filters out chunks below the relevance threshold.
     """
 
-    def __init__(self, min_score: float = 0.1):
+    def __init__(self, min_score: float = 0.01):
         self.min_score = min_score
 
     def rerank(self, query: str, hits: list[Hit], top_k: int = 3) -> list[Hit]:

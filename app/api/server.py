@@ -98,9 +98,9 @@ def health() -> HealthResponse:
     collections: dict = {}
     if _qdrant_client:
         try:
-            for col in [config.COLLECTION_DOCS, config.COLLECTION_VIDEOS]:
-                info = _qdrant_client.get_collection(col)
-                collections[col] = {"points": info.points_count}
+            # Check ttt_memory as a representative collection
+            info = _qdrant_client.get_collection("ttt_memory")
+            collections["ttt_memory"] = {"points": info.points_count}
         except Exception:
             pass
     return HealthResponse(
@@ -179,7 +179,7 @@ async def ingest_doc(
     if _doc_pipeline is None:
         raise HTTPException(503, detail="Pipeline tài liệu chưa sẵn sàng.")
 
-    target_col = collection or config.COLLECTION_DOCS
+    target_col = collection or "ttt_documents"
     dest = config.UPLOADS_DIR / file.filename
     content = await file.read()
     dest.write_bytes(content)
@@ -206,7 +206,7 @@ def ingest_video(req: VideoIngestRequest) -> VideoIngestResponse:
     if _video_pipeline is None:
         raise HTTPException(503, detail="Pipeline video chưa sẵn sàng.")
 
-    target_col = req.collection or config.COLLECTION_VIDEOS
+    target_col = req.collection or "ttt_videos"
     try:
         result = _video_pipeline.ingest_url(req.url, title=req.title, collection=target_col)
     except Exception as exc:

@@ -15,6 +15,13 @@ def _detect_device() -> str:
         # MPS (Apple Silicon) gây hallucination/lặp với Whisper, không dùng
     except Exception:
         pass
+        
+    from app import config
+    if config.REQUIRE_GPU:
+        raise RuntimeError(
+            "REQUIRE_GPU=1 but no CUDA device found for Whisper! "
+            "Whisper on CPU is too slow. Please check drivers or set REQUIRE_GPU=0."
+        )
     logger.info("Whisper sử dụng CPU")
     return "cpu"
 

@@ -23,8 +23,6 @@ QDRANT_VECTOR_NAME: str = os.getenv("QDRANT_VECTOR_NAME", "")
 QDRANT_VMEDIA_URL: str = os.getenv("QDRANT_VMEDIA_URL", "")
 QDRANT_VMEDIA_API_KEY: str = os.getenv("QDRANT_VMEDIA_API_KEY", "")
 
-COLLECTION_DOCS: str = os.getenv("COLLECTION_DOCS", "ttt_documents")
-COLLECTION_VIDEOS: str = os.getenv("COLLECTION_VIDEOS", "ttt_videos")
 VMEDIA_COLLECTIONS: list[str] = os.getenv(
     "VMEDIA_COLLECTIONS",
     "vmedia_content,vmedia_design,vmedia_digital,vmedia_documents,vmedia_fonts,vmedia_image,vmedia_media,vmedia_qa,vmedia_ttnb",
@@ -46,6 +44,9 @@ RERANK_TOP_K: int = int(os.getenv("RERANK_TOP_K", "5"))
 # API
 API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
 API_PORT: int = int(os.getenv("API_PORT", "8000"))
+
+# GPU Requirement
+REQUIRE_GPU: bool = os.getenv("REQUIRE_GPU", "0").strip().lower() not in ("0", "false", "no")
 
 # YouTube transcript proxy (để vượt qua IP block).
 # 3 cách cấu hình, ưu tiên theo thứ tự:

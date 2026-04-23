@@ -51,7 +51,7 @@ class IngestResponse(BaseModel):
 class VideoIngestRequest(BaseModel):
     url: str = Field(..., description="YouTube URL hoặc đường dẫn file video")
     title: Optional[str] = None
-    collection: Optional[str] = None  # defaults to COLLECTION_VIDEOS
+    collection: Optional[str] = None
 
 
 class VideoIngestResponse(BaseModel):

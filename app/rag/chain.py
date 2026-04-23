@@ -50,7 +50,7 @@ _TRAILING_NUMBERED_PATTERN = re.compile(
 # 0.18 (hạ từ 0.25) — thả lỏng cho query overview/liệt kê match được một chunk
 # cụ thể; <refusal_protocol> trong system prompt vẫn là lớp chặn cuối nếu doc
 # thực sự không nói tới chủ đề.
-_MIN_CONFIDENCE_TO_ANSWER: float = 0.05
+_MIN_CONFIDENCE_TO_ANSWER: float = 0.01
 
 _REFUSAL_TEMPLATE = (
     "Tài liệu TDI hiện chưa có thông tin về câu hỏi này.\n\n"
