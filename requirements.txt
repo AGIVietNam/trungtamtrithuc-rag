@@ -11,7 +11,7 @@ qdrant-client>=1.11.0
 voyageai
 pdfplumber
 pdf2image
-docling[mlx]
+docling
 openpyxl
 pandas
 markdown
@@ -28,5 +28,6 @@ torch==2.5.1+cu124
 torchvision==0.20.1+cu124
 torchaudio==2.5.1+cu124
 sentence-transformers
+transformers
 pytest-asyncio
 boto3
