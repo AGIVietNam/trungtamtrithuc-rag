@@ -12,15 +12,14 @@ from app.schemas import ChatRequest, ChatResponse
 from app.config import (
     ANTHROPIC_API_KEY, CLAUDE_MODEL,
     VOYAGE_API_KEY, VOYAGE_MODEL, VOYAGE_DIM,
-    QDRANT_URL, QDRANT_API_KEY,
+    QDRANT_URL, QDRANT_API_KEY, QDRANT_VECTOR_NAME,
     QDRANT_VMEDIA_URL, QDRANT_VMEDIA_API_KEY, VMEDIA_COLLECTIONS,
-    COLLECTION_DOCS, COLLECTION_VIDEOS,
     TOP_K, RERANK_TOP_K,
     CONV_WINDOW_TURNS,
 )
 from app.core.claude_client import ClaudeClient
 from app.core.voyage_embed import VoyageEmbedder
-from app.core.qdrant_store import QdrantStore, VMediaReadOnlyStore
+from app.core.qdrant_store import QdrantStore, VMediaReadOnlyStore, QdrantRegistry
 from app.core.session_memory import memory
 from app.core.conv_memory import ConversationMemory
 from app.core.conv_summarizer import summarize as summarize_conv
@@ -78,39 +77,24 @@ def _get_chain() -> RAGChain:
     voyage = VoyageEmbedder(api_key=VOYAGE_API_KEY, model=VOYAGE_MODEL)
     claude = _get_claude()
 
-    qdrant_docs = QdrantStore(
-        url=QDRANT_URL, api_key=QDRANT_API_KEY,
-        collection=COLLECTION_DOCS, vector_size=VOYAGE_DIM,
-    )
-    qdrant_videos = QdrantStore(
-        url=QDRANT_URL, api_key=QDRANT_API_KEY,
-        collection=COLLECTION_VIDEOS, vector_size=VOYAGE_DIM,
+    registry = QdrantRegistry(
+        url=QDRANT_URL,
+        api_key=QDRANT_API_KEY,
+        vector_size=VOYAGE_DIM,
+        vector_name=QDRANT_VECTOR_NAME,
     )
     vmedia_store = VMediaReadOnlyStore(
         url=QDRANT_VMEDIA_URL, vmedia_api_key=QDRANT_VMEDIA_API_KEY,
         collections=VMEDIA_COLLECTIONS,
     )
     logger.info(
-        "_get_chain init: qdrant_url=%s docs=%s videos=%s vector_name=%r",
-        QDRANT_URL[:50], COLLECTION_DOCS, COLLECTION_VIDEOS,
-        qdrant_docs.vector_name,
+        "_get_chain init: qdrant_url=%s registry_collections=%d vmedia_collections=%d",
+        QDRANT_URL[:50], len(registry.collection_names()), len(VMEDIA_COLLECTIONS),
     )
-
-    # Đảm bảo payload index `domain` tồn tại TRƯỚC khi search có filter.
-    # Lifespan startup cũng gọi, nhưng nếu server deploy code mới mà không
-    # restart đúng cách (hoặc lifespan fail) thì index chưa có → Qdrant 400
-    # → _search_one nuốt exception → hits=0 → refusal sai.
-    # Gọi ở đây (idempotent) đảm bảo index luôn sẵn sàng.
-    try:
-        qdrant_docs.ensure_payload_indexes(["domain"])
-        qdrant_videos.ensure_payload_indexes(["domain"])
-    except Exception:
-        logger.warning("_get_chain: ensure_payload_indexes failed", exc_info=True)
 
     retriever = Retriever(
         voyage=voyage,
-        qdrant_docs=qdrant_docs,
-        qdrant_videos=qdrant_videos,
+        registry=registry,
         vmedia_store=vmedia_store,
     )
     reranker = CrossEncoderReranker()

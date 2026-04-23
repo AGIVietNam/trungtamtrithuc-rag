@@ -12,17 +12,9 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import API_HOST, API_PORT, LOG_DIR
 
-# `app.ingestion.doc_pipeline` gắn FileHandler lên root logger (catch mọi
-# module), nhưng level root mặc định = WARNING → INFO bị filter trước khi
-# tới handler. Bật INFO cho namespace `app` để các log timing trong
-# RAGChain.answer + claude usage trong claude_client xuất hiện. Không động
-# tới root → urllib3/anthropic/etc. vẫn yên.
 _app_logger = logging.getLogger("app")
 _app_logger.setLevel(logging.INFO)
 
-# File handler: ghi mọi log namespace `app.*` (middleware timing, endpoint
-# step breakdown, RAGChain, pipelines) ra file xoay vòng theo ngày. Tách
-# biệt với ingest log cũ trong doc_pipeline.py để không bị trộn format.
 _API_LOG_FILE = LOG_DIR / "api.log"
 if not any(
     isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == str(_API_LOG_FILE)
@@ -42,39 +34,59 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """Eager-load cross-encoder + chain lúc startup → request đầu không delay."""
+    """Startup: tạo 24 Qdrant collections + warmup reranker + ensure memory indexes."""
     import asyncio
 
     def _warmup() -> None:
+        # ── 1. Reranker warmup ────────────────────────────────────────────────
         try:
             from app.rag.reranker import warmup as _rerank_warmup
             _rerank_warmup()
         except Exception:
             logger.exception("Reranker warmup failed")
 
-        # Tạo payload index cho ttt_memory (idempotent). Trước fix này, mọi
-        # filter user_id/session_id trên ttt_memory đều fail 400, khiến
-        # tier-3 vector recall + semantic dedup chưa từng chạy đúng.
+        # ── 2. Tạo 24 Qdrant collections (12 domain × docs + videos) ─────────
+        # Idempotent: chỉ tạo collection nếu chưa tồn tại, không xóa data cũ.
+        # Lần đầu deploy: tạo đủ 24. Restart sau: skip (collection đã có).
+        try:
+            from app.config import QDRANT_URL, QDRANT_API_KEY, VOYAGE_DIM, QDRANT_VECTOR_NAME
+            from app.core.qdrant_store import QdrantRegistry
+            registry = QdrantRegistry(
+                url=QDRANT_URL,
+                api_key=QDRANT_API_KEY,
+                vector_size=VOYAGE_DIM,
+                vector_name=QDRANT_VECTOR_NAME,
+            )
+            registry.ensure_all()   # tạo đủ 24 collections, log tên từng cái
+        except Exception:
+            logger.exception("QdrantRegistry.ensure_all failed")
+
+        # ── 3. Ensure payload indexes cho ttt_memory ──────────────────────────
+        # (collection memory dùng filter user_id + session_id → cần keyword index)
         try:
             from app.api.chat import _get_conv_memory
             _get_conv_memory().ensure_indexes()
         except Exception:
             logger.exception("conv_memory ensure_indexes failed")
 
-        # Tạo payload index `domain` cho ttt_documents + ttt_videos (idempotent).
-        # Retriever gắn filter `domain` khi FE gửi domain thật (bim/mep/cntt...).
-        # Cluster mới chưa có index → Qdrant 400 → hits=[] → chain luôn trả
-        # refusal 226 char dù tài liệu đã upsert đúng domain. Tự setup ở đây
-        # để không phải chạy curl tay trên từng cluster khi deploy môi trường mới.
+        # ── 4. Inject registry vào chain (thay thế qdrant_docs / qdrant_videos) ─
+        # Chain sẽ dùng registry để route search đúng collection theo domain.
         try:
             from app.api.chat import _get_chain
-            chain = _get_chain()
-            chain.retriever.qdrant_docs.ensure_payload_indexes(["domain"])
-            chain.retriever.qdrant_videos.ensure_payload_indexes(["domain"])
-        except Exception:
-            logger.exception("qdrant ensure_payload_indexes failed")
+            from app.config import QDRANT_URL, QDRANT_API_KEY, VOYAGE_DIM, QDRANT_VECTOR_NAME
+            from app.core.qdrant_store import QdrantRegistry
 
-    # Chạy trong thread riêng để không block event loop (model load CPU-bound).
+            chain = _get_chain()
+            chain.retriever.registry = QdrantRegistry(
+                url=QDRANT_URL,
+                api_key=QDRANT_API_KEY,
+                vector_size=VOYAGE_DIM,
+                vector_name=QDRANT_VECTOR_NAME,
+            )
+            logger.info("chain.retriever.registry injected: 24 collections ready")
+        except Exception:
+            logger.exception("chain registry inject failed")
+
     try:
         await asyncio.to_thread(_warmup)
     except Exception:
@@ -92,9 +104,6 @@ app.add_middleware(
 )
 
 
-# Log tổng thời gian mỗi request. Step-level timing được log trong từng
-# endpoint/pipeline (xem app.api.ingest, app.rag.chain) — middleware này chỉ
-# ghi "wall clock" toàn API để so sánh với step breakdown.
 @app.middleware("http")
 async def log_request_duration(request: Request, call_next):
     start = time.perf_counter()
@@ -115,7 +124,7 @@ async def log_request_duration(request: Request, call_next):
     response.headers["X-Process-Time"] = f"{elapsed:.3f}"
     return response
 
-# Routes registered lazily to avoid circular imports at startup
+
 from app.api import ingest, chat  # noqa: E402
 
 app.include_router(ingest.router, prefix="/api/ingest", tags=["ingest"])
@@ -135,5 +144,4 @@ except Exception:
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("app.main:app", host=API_HOST, port=API_PORT, reload=True)

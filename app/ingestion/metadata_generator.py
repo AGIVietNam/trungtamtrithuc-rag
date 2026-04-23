@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 
 # Giữ Literal ở dạng literal strings (Pydantic/type checker không đọc được
 # Literal[*tuple]), rồi assert với DOMAIN_PERSONAS để bắt drift sớm lúc import.
+# 10 concrete domain — upload form bắt buộc chọn 1 trong đây, không có "mặc định".
 DomainLiteral = Literal[
     "bim",
     "mep",
-    "kết cấu",
     "marketing",
     "pháp lý",
     "sản xuất",
@@ -36,15 +36,19 @@ DomainLiteral = Literal[
     "tài chính",
     "kinh doanh",
     "thiết kế",
-    "mặc định",
 ]
 
 DOMAIN_VALUES: list[str] = list(get_args(DomainLiteral))
 
-# Guard drift: nếu ai đổi DOMAIN_PERSONAS mà quên cập nhật ở đây, build fail sớm.
-assert set(DOMAIN_VALUES) == set(_PERSONA_DOMAINS), (
-    "Domain drift giữa metadata_generator và prompt_builder.DOMAIN_PERSONAS: "
-    f"symmetric_diff={set(DOMAIN_VALUES) ^ set(_PERSONA_DOMAINS)}"
+# Guard drift: classifier không trả "mặc định" (đó chỉ là persona chat chung),
+# nhưng phải là subset của DOMAIN_PERSONAS để persona prompt vẫn lookup được.
+assert set(DOMAIN_VALUES).issubset(set(_PERSONA_DOMAINS)), (
+    "Domain drift: metadata_generator có value không có trong DOMAIN_PERSONAS: "
+    f"missing_in_personas={set(DOMAIN_VALUES) - set(_PERSONA_DOMAINS)}"
+)
+assert set(_PERSONA_DOMAINS) - set(DOMAIN_VALUES) == {"mặc định"}, (
+    "DOMAIN_PERSONAS chỉ được thừa đúng 'mặc định' so với classifier. "
+    f"extra={set(_PERSONA_DOMAINS) - set(DOMAIN_VALUES) - {'mặc định'}}"
 )
 
 MIN_TEXT_LEN = 200       # dưới ngưỡng này input không đủ ngữ cảnh, skip LLM
@@ -106,11 +110,11 @@ _SYSTEM_PROMPT = """Bạn là trợ lý phân loại tài liệu kỹ thuật ti
 Nhiệm vụ: Đọc trích đoạn tài liệu và GỌI tool save_document_metadata với 4 field.
 
 <domain_guide>
-Chọn ĐÚNG 1 domain từ danh sách (phải khớp giá trị, lowercase, có dấu tiếng Việt):
+Chọn ĐÚNG 1 domain từ danh sách (phải khớp giá trị, lowercase, có dấu tiếng Việt).
+Bắt buộc gán được 1 domain — nếu lưỡng lự, chọn cái gần nhất, KHÔNG được từ chối.
 - bim: BIM, IFC, Revit, LOD, clash detection, mô hình 3D công trình
 - mep: điện, cơ, nước, HVAC, PCCC, sprinkler, ELV, BMS
-- kết cấu: bê tông, thép, móng, tải trọng, FEM, kết cấu công trình
-- thiết kế: kiến trúc, quy hoạch, nội thất, concept/schematic design, AutoCAD/Revit/SketchUp, material board
+- thiết kế: kiến trúc, quy hoạch, nội thất, concept/schematic design, AutoCAD/Revit/SketchUp, material board, bê tông/thép/móng/tải trọng/FEM (kết cấu gộp vào thiết kế)
 - marketing: truyền thông, thương hiệu, campaign, content, funnel, conversion, KPI marketing
 - kinh doanh: pipeline bán hàng, KAM, hoa hồng, sales forecast, hợp đồng khung, closing rate
 - sản xuất: thi công, an toàn lao động, tiến độ, Lean, 5S, Kaizen, OEE, SOP, BOM
@@ -118,7 +122,6 @@ Chọn ĐÚNG 1 domain từ danh sách (phải khớp giá trị, lowercase, có
 - tài chính: BCTC, dòng tiền, NPV/IRR, ROI, ngân sách, thuế TNDN/GTGT, VAS/IFRS, EBITDA
 - nhân sự: tuyển dụng, C&B, OKR/KPI, đào tạo, onboarding, Bộ luật Lao động, BHXH/BHYT/BHTN
 - công nghệ thông tin: hạ tầng mạng, cloud AWS/Azure/GCP, bảo mật ISO 27001, ERP/CRM, DevOps, VPN, SSO
-- mặc định: không khớp rõ với bất kỳ nhóm nào ở trên
 </domain_guide>
 
 <rules>

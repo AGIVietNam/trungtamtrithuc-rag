@@ -179,7 +179,7 @@ class RAGChain:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             f_docs = ex.submit(
                 self.retriever.retrieve,
-                search_query, self.top_k, sources_filter, expert_domain,
+                query=search_query, top_k=self.top_k, domain=expert_domain, sources=sources_filter,
                 query_vec=query_vec,
             )
             f_conv = None
@@ -299,7 +299,7 @@ class RAGChain:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             f_docs = ex.submit(
                 self.retriever.retrieve,
-                search_query, self.top_k, sources_filter, expert_domain,
+                query=search_query, top_k=self.top_k, domain=expert_domain, sources=sources_filter,
                 query_vec=query_vec,
             )
             f_conv = None

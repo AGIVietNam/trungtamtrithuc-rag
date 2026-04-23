@@ -10,7 +10,7 @@ from pathlib import Path
 from app.core import config
 from app.core.chunker import chunk_text
 from app.core.voyage_embed import VoyageEmbedder
-from app.core.qdrant_store import QdrantStore
+from app.core.qdrant_store import QdrantStore, QdrantRegistry, PERSONA_TO_DOMAIN
 from app.ingestion.doc_parser import parse, _fix_common_typos
 
 logger = logging.getLogger(__name__)
@@ -66,26 +66,39 @@ class IngestResult:
     source_name: str
 
 
-def ensure_collections() -> None:
-    import requests
+_registry: QdrantRegistry | None = None
 
-    store = QdrantStore(
-        url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY,
-        collection=config.COLLECTION_DOCS, vector_size=config.VOYAGE_DIM,
-    )
-    store.ensure_collection()
 
-    try:
-        requests.put(
-            f"{store.url}/collections/{store.collection}/index",
-            headers=store._headers(),
-            json={"field_name": "doc_id", "field_schema": "keyword"},
-            timeout=30,
+def _get_registry() -> QdrantRegistry:
+    """Lazy singleton — tránh tạo lại 20 store dict mỗi lần ingest."""
+    global _registry
+    if _registry is None:
+        _registry = QdrantRegistry(
+            url=config.QDRANT_URL,
+            api_key=config.QDRANT_API_KEY,
+            vector_size=config.VOYAGE_DIM,
+            vector_name=getattr(config, "QDRANT_VECTOR_NAME", ""),
         )
-    except Exception:
-        logger.warning("Could not create doc_id index")
+    return _registry
 
-    logger.info("Ensured collection: %s", config.COLLECTION_DOCS)
+
+def _resolve_domain_store(metadata: dict | None, source: str) -> QdrantStore:
+    """Pick đúng tdi_{source}_{slug} theo metadata['domain'].
+
+    Raise ValueError nếu metadata thiếu hoặc domain không hợp lệ — upload form
+    bắt buộc gửi 1 trong 10 persona key.
+    """
+    domain_key = (metadata or {}).get("domain", "").strip()
+    if not domain_key:
+        raise ValueError(
+            "metadata['domain'] là bắt buộc khi ingest — hãy chọn lĩnh vực ở form upload."
+        )
+    if domain_key not in PERSONA_TO_DOMAIN:
+        raise ValueError(
+            f"domain={domain_key!r} không hợp lệ. "
+            f"Chọn 1 trong: {list(PERSONA_TO_DOMAIN.keys())}"
+        )
+    return _get_registry().get_by_persona(domain_key, source)
 
 
 # --- Table detection & processing ---
@@ -257,18 +270,26 @@ def ingest_document(
     uploaded_at = parsed["uploaded_at"]
     content = parsed["content"]
 
-    # Delete old chunks before re-ingesting
-    store_cleanup = QdrantStore(
-        url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY,
-        collection=config.COLLECTION_DOCS, vector_size=config.VOYAGE_DIM,
-    )
+    # Route theo domain — validate metadata trước khi parse nội dung nặng là lý tưởng,
+    # nhưng parse đã xong ở trên (không thể rollback), nên validate ở đây vẫn OK
+    # vì delete_by_filter/upsert mới là phần tốn tiền (vector embed + Qdrant write).
+    store = _resolve_domain_store(metadata, "docs")
+
+    # Delete old chunks theo doc_id trong chính collection domain đó — nếu user
+    # đổi domain cho cùng file, bản cũ ở domain khác sẽ vẫn còn: đó là hành vi
+    # có chủ đích (user tự reup/xoá thủ công nếu cần dời).
     try:
-        store_cleanup.delete_by_filter({
+        store.delete_by_filter({
             "must": [{"key": "doc_id", "match": {"value": doc_id}}]
         })
-        logger.info("Deleted old chunks for doc_id=%s", doc_id)
+        logger.info(
+            "Deleted old chunks for doc_id=%s in %s", doc_id, store.collection,
+        )
     except Exception:
-        logger.warning("Could not delete old chunks for doc_id=%s", doc_id)
+        logger.warning(
+            "Could not delete old chunks for doc_id=%s in %s",
+            doc_id, store.collection,
+        )
 
     # Flatten pages
     if isinstance(content, list):
@@ -278,10 +299,6 @@ def ingest_document(
 
     num_pages = len(page_texts)
     embedder = VoyageEmbedder(api_key=config.VOYAGE_API_KEY, model=config.VOYAGE_MODEL)
-    store = QdrantStore(
-        url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY,
-        collection=config.COLLECTION_DOCS, vector_size=config.VOYAGE_DIM,
-    )
 
     all_points: list[dict] = []
     chunk_index = 0

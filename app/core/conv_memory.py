@@ -34,6 +34,7 @@ from app.config import (
     CONV_MIN_BOT_CHARS,
     CONV_DEDUP_THRESHOLD,
     CONV_HASH_CACHE_SIZE,
+    VOYAGE_DIM,
 )
 from app.core.voyage_embed import VoyageEmbedder
 
@@ -214,15 +215,51 @@ class ConversationMemory:
         return self.embedder.embed_query(text)
 
     # -------------------------------------------------------------- bootstrap
+    def ensure_collection(self) -> None:
+        """Tạo ttt_memory collection nếu chưa tồn tại (idempotent).
+
+        Qdrant KHÔNG auto-create collection khi upsert — phải tạo trước.
+        Trước đây upsert đầu tiên sẽ fail 404, pair bị mất lặng lẽ cho tới
+        khi ai đó tạo collection thủ công. Gọi 1 lần lúc startup là đủ.
+
+        Vector name để rỗng ("") theo convention đã dùng ở upsert/search.
+        """
+        try:
+            r = requests.get(
+                f"{self.url}/collections/{self.collection}",
+                headers=self._headers(),
+                timeout=30,
+            )
+            if r.status_code == 200:
+                return
+            if r.status_code != 404:
+                r.raise_for_status()
+
+            body = {
+                "vectors": {
+                    self._vector_name: {
+                        "size": VOYAGE_DIM,
+                        "distance": "Cosine",
+                    }
+                }
+            }
+            self._req("PUT", f"/collections/{self.collection}", body)
+            logger.info("conv_memory collection '%s' created", self.collection)
+        except Exception:
+            logger.exception(
+                "conv_memory ensure_collection failed — "
+                "upsert/recall sẽ bị bỏ qua tới khi collection tồn tại",
+            )
+
     def ensure_indexes(self) -> None:
-        """Tạo payload index cho user_id + session_id (idempotent).
+        """Tạo collection + payload index cho user_id + session_id (idempotent).
 
         Qdrant yêu cầu payload index để filter exact match. Khi chưa có index,
         mọi search có `filter.must.user_id` đều fail 400 — bị nuốt im lặng bởi
-        try/except ở `retrieve()` và `_find_near_duplicate()`. Hệ quả: tier-3
-        vector recall và semantic dedup chưa từng chạy đúng. Gọi 1 lần lúc
+        try/except ở `retrieve()` và `_find_near_duplicate()`. Gọi 1 lần lúc
         startup là đủ — Qdrant trả 200 idempotent nếu index đã tồn tại.
         """
+        self.ensure_collection()
         for field in ("user_id", "session_id"):
             try:
                 self._req(
@@ -232,9 +269,6 @@ class ConversationMemory:
                 )
                 logger.info("conv_memory ensured payload index: %s", field)
             except Exception as exc:
-                # Không raise — collection có thể chưa tồn tại lần startup đầu
-                # (chưa có pair nào upsert). Lần sau pair đầu tiên sẽ tạo
-                # collection, lần restart kế tiếp sẽ tạo index thành công.
                 logger.warning(
                     "conv_memory ensure_indexes(%s) skipped: %s", field, exc
                 )

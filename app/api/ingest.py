@@ -8,24 +8,33 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, UploadFile
 
 from app.schemas import IngestResponse
-from app.ingestion.doc_pipeline import ingest_document, ensure_collections
+from app.ingestion.doc_pipeline import ingest_document
 from app.ingestion.metadata_generator import generate_document_metadata
+from app.core.qdrant_store import PERSONA_TO_DOMAIN
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Ensure Qdrant collections exist on first import
-try:
-    ensure_collections()
-except Exception as exc:
-    logger.warning("Could not ensure collections at startup: %s", exc)
 
-try:
-    from app.ingestion.video_pipeline import ensure_collections as ensure_video_collections
-    ensure_video_collections()
-except Exception as exc:
-    logger.warning("Could not ensure video collections at startup: %s", exc)
+# Lifespan (main.py:_lifespan) gọi registry.ensure_all() tạo đủ 20 collection —
+# không ensure ở module import nữa để tránh ghi đè thứ tự startup.
+
+
+VALID_DOMAINS: frozenset[str] = frozenset(PERSONA_TO_DOMAIN.keys())
+
+
+def _validate_domain(domain: str) -> str | None:
+    """Trả về message lỗi nếu domain không hợp lệ, None nếu OK."""
+    d = (domain or "").strip()
+    if not d:
+        return "Lĩnh vực (domain) là bắt buộc — vui lòng chọn lĩnh vực trước khi upload."
+    if d not in VALID_DOMAINS:
+        return (
+            f"Lĩnh vực '{d}' không hợp lệ. "
+            f"Chọn 1 trong: {sorted(VALID_DOMAINS)}"
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +44,6 @@ except Exception as exc:
 @router.post("/file", response_model=IngestResponse)
 async def ingest_file(
     file: UploadFile = File(...),
-    collection: str = Form(default="ttt_documents"),
     title: str = Form(default=""),
     domain: str = Form(default=""),
     description: str = Form(default=""),
@@ -43,6 +51,10 @@ async def ingest_file(
     url: str = Form(default=""),
 ) -> IngestResponse:
     t0 = time.perf_counter()
+    domain_err = _validate_domain(domain)
+    if domain_err:
+        return IngestResponse(status="error", chunks_added=0, message=domain_err)
+
     suffix = Path(file.filename).suffix.lower()
     if suffix not in (".pdf", ".docx", ".doc", ".txt", ".md", ".xlsx"):
         return IngestResponse(
@@ -224,7 +236,6 @@ def _build_metadata_dict(
 @router.post("/video/file", response_model=IngestResponse)
 async def ingest_video_file(
     file: UploadFile = File(...),
-    collection: str = Form(default="ttt_videos"),
     title: str = Form(default=""),
     domain: str = Form(default=""),
     description: str = Form(default=""),
@@ -232,6 +243,10 @@ async def ingest_video_file(
     url: str = Form(default=""),
 ) -> IngestResponse:
     t0 = time.perf_counter()
+    domain_err = _validate_domain(domain)
+    if domain_err:
+        return IngestResponse(status="error", chunks_added=0, message=domain_err)
+
     suffix = Path(file.filename).suffix.lower()
     if suffix not in VIDEO_SUFFIXES:
         return IngestResponse(
@@ -387,7 +402,6 @@ def _is_playlist_url(url: str) -> bool:
 @router.post("/youtube", response_model=IngestResponse)
 async def ingest_youtube(
     url: str,
-    collection: str = "ttt_videos",
     title: str = Form(default=""),
     domain: str = Form(default=""),
     description: str = Form(default=""),
@@ -400,6 +414,9 @@ async def ingest_youtube(
             chunks_added=0,
             message="Vui lòng nhập URL YouTube.",
         )
+    domain_err = _validate_domain(domain)
+    if domain_err:
+        return IngestResponse(status="error", chunks_added=0, message=domain_err)
 
     clean_url = url.strip()
     meta = _build_metadata_dict(title, domain, description, tags, url=clean_url)
@@ -600,7 +617,9 @@ async def preview_youtube_metadata(url: str) -> dict:
         "thumbnail": yt.get("thumbnail", ""),
         "channel": yt.get("channel", ""),
         "duration_sec": yt.get("duration_sec", 0),
-        "domain": ai_meta.domain if ai_meta else "mặc định",
+        # AI fail → trả chuỗi rỗng để FE buộc user chọn domain thủ công
+        # (form upload validate domain bắt buộc, không nhận "mặc định").
+        "domain": ai_meta.domain if ai_meta else "",
         "tags": ai_meta.tags if ai_meta else [],
         "sources": {
             "title": "youtube",

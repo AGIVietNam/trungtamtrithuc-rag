@@ -17,6 +17,7 @@ VOYAGE_DIM: int = int(os.getenv("VOYAGE_DIM", "1024"))
 # Qdrant (main cluster — ttt_*)
 QDRANT_URL: str = os.getenv("QDRANT_URL", "")
 QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
+QDRANT_VECTOR_NAME: str = os.getenv("QDRANT_VECTOR_NAME", "")
 
 # Qdrant (vmedia cluster — READ ONLY)
 QDRANT_VMEDIA_URL: str = os.getenv("QDRANT_VMEDIA_URL", "")

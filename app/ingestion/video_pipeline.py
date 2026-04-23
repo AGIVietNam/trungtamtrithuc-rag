@@ -9,9 +9,41 @@ from pathlib import Path
 from app.core import config
 from app.core.chunker import chunk_transcript_with_timestamps
 from app.core.voyage_embed import VoyageEmbedder
-from app.core.qdrant_store import QdrantStore
+from app.core.qdrant_store import QdrantStore, QdrantRegistry, PERSONA_TO_DOMAIN
 
 logger = logging.getLogger(__name__)
+
+
+_registry: QdrantRegistry | None = None
+
+
+def _get_registry() -> QdrantRegistry:
+    """Lazy singleton dùng chung cho cả video_pipeline (độc lập với doc_pipeline)."""
+    global _registry
+    if _registry is None:
+        _registry = QdrantRegistry(
+            url=config.QDRANT_URL,
+            api_key=config.QDRANT_API_KEY,
+            vector_size=config.VOYAGE_DIM,
+            vector_name=getattr(config, "QDRANT_VECTOR_NAME", ""),
+        )
+    return _registry
+
+
+def _resolve_domain_store(metadata: dict | None) -> QdrantStore:
+    """Pick đúng tdi_videos_{slug} theo metadata['domain']."""
+    domain_key = (metadata or {}).get("domain", "").strip()
+    if not domain_key:
+        raise ValueError(
+            "metadata['domain'] là bắt buộc khi ingest video — "
+            "hãy chọn lĩnh vực ở form upload."
+        )
+    if domain_key not in PERSONA_TO_DOMAIN:
+        raise ValueError(
+            f"domain={domain_key!r} không hợp lệ. "
+            f"Chọn 1 trong: {list(PERSONA_TO_DOMAIN.keys())}"
+        )
+    return _get_registry().get_by_persona(domain_key, "videos")
 
 
 def format_transcript_string(segments: list[dict]) -> str:
@@ -47,14 +79,11 @@ def build_video_link(payload: dict) -> str:
 
 
 def ensure_collections() -> None:
-    store = QdrantStore(
-        url=config.QDRANT_URL,
-        api_key=config.QDRANT_API_KEY,
-        collection=config.COLLECTION_VIDEOS,
-        vector_size=config.VOYAGE_DIM,
-    )
-    store.ensure_collection()
-    logger.info("Ensured collection: %s", config.COLLECTION_VIDEOS)
+    """No-op — registry.ensure_all() ở main.py lifespan đã tạo đủ 20 collection.
+
+    Giữ symbol này để không vỡ import từ app/api/ingest.py (backward compat).
+    """
+    return
 
 
 _PLAYLIST_PAYLOAD_KEYS = (
@@ -82,13 +111,11 @@ def _upsert_video_chunks(
     if not chunks:
         return 0
 
+    # Route theo domain — raise ValueError nếu metadata thiếu/sai trước khi tốn
+    # embedding cost.
+    store = _resolve_domain_store(metadata)
+
     embedder = VoyageEmbedder(api_key=config.VOYAGE_API_KEY, model=config.VOYAGE_MODEL)
-    store = QdrantStore(
-        url=config.QDRANT_URL,
-        api_key=config.QDRANT_API_KEY,
-        collection=config.COLLECTION_VIDEOS,
-        vector_size=config.VOYAGE_DIM,
-    )
 
     texts = [c["text"] for c in chunks]
     vectors = embedder.embed_documents(texts)
@@ -118,7 +145,7 @@ def _upsert_video_chunks(
         }
         if file_source == "youtube" and source_url:
             payload["youtube_url"] = f"https://www.youtube.com/watch?v={video_id}&t={int(start_sec)}s"
-        # Inject metadata top-level để filter/display đồng bộ với ttt_documents
+        # Inject metadata top-level để filter/display đồng bộ với doc pipeline
         if metadata:
             if metadata.get("domain"):
                 payload["domain"] = metadata["domain"]
