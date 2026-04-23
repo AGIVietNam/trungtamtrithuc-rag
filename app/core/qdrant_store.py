@@ -265,6 +265,8 @@ class QdrantRegistry:
         for store in self._stores.values():
             try:
                 store.ensure_collection()
+                # Tạo index cho các field dùng trong filter/dedup
+                store.ensure_payload_indexes(["doc_id", "domain", "metadata.domain"])
                 created += 1
             except Exception as e:
                 print(f"ensure_all: FAILED for collection '{store.collection}': {e}")
