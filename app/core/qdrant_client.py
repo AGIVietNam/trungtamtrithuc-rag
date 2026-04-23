@@ -6,7 +6,10 @@ from functools import lru_cache
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
+import logging
 from app.core import config
+
+logger = logging.getLogger(__name__)
 
 _client: QdrantClient | None = None
 
@@ -14,6 +17,7 @@ _client: QdrantClient | None = None
 def get_client() -> QdrantClient:
     global _client
     if _client is None:
+        logger.info("Connecting to Qdrant at %s", config.QDRANT_URL)
         _client = QdrantClient(url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY)
     return _client
 

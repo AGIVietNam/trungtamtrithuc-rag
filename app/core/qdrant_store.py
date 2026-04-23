@@ -200,6 +200,7 @@ class QdrantRegistry:
         vector_size: int = 1024,
         vector_name: str = "",
     ):
+        logger.info("Initializing QdrantRegistry for cluster: %s", url)
         self.url = url
         self.api_key = api_key
         self._stores: dict[str, QdrantStore] = {}
@@ -293,6 +294,7 @@ class VMediaReadOnlyStore:
         collections: list[str],
         vector_name: str = "",
     ):
+        logger.info("Initializing VMediaReadOnlyStore for cluster: %s", url)
         self.url = url.rstrip("/")
         self.api_key = vmedia_api_key
         self.collections = collections

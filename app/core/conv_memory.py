@@ -125,6 +125,7 @@ class ConversationMemory:
     """
 
     def __init__(self, embedder: VoyageEmbedder | None = None):
+        logger.info("Initializing ConversationMemory for cluster: %s", QDRANT_URL)
         self.url = QDRANT_URL.rstrip("/")
         self.api_key = QDRANT_API_KEY
         self.collection = CONV_COLLECTION
