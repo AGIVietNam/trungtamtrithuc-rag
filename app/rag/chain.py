@@ -255,7 +255,6 @@ class RAGChain:
         t_claude = time.perf_counter()
 
         clean_answer, suggested_questions = _extract_suggestions(answer_text)
-        has_sources = "Nguồn:" in clean_answer or "nguồn:" in clean_answer.lower()
 
         top_score = hits[0].score if hits else 0.0
         logger.info(
@@ -277,7 +276,7 @@ class RAGChain:
 
         return {
             "answer": final_answer,
-            "sources": filtered_sources if has_sources else [],
+            "sources": filtered_sources,
             "confidence": _confidence(top_score),
             "suggested_questions": suggested_questions,
             "rewritten_query": search_query if search_query != query else None,
@@ -391,8 +390,7 @@ class RAGChain:
             yield {"type": "delta", "text": chunk}
 
         full_text = "".join(buffer_parts)
-        clean_answer, suggested_questions = _extract_suggestions(full_text)
-        has_sources = "Nguồn:" in clean_answer or "nguồn:" in clean_answer.lower()
+        _, suggested_questions = _extract_suggestions(full_text)
 
         # Lọc nguồn: Chỉ lấy các nguồn có điểm cao và giới hạn số lượng hiển thị
         filtered_sources = [s for s in source_mapping if s["score"] >= _MIN_SOURCE_SCORE_TO_SHOW]
@@ -401,6 +399,6 @@ class RAGChain:
         yield {
             "type": "done",
             "answer": full_text,
-            "sources": filtered_sources if has_sources else [],
+            "sources": filtered_sources,
             "suggested_questions": suggested_questions,
         }

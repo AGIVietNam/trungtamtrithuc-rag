@@ -396,6 +396,7 @@ def _resolve_source_fields(payload: dict) -> dict:
     raw_ts = payload.get("start") or payload.get("timestamp")
     base_url = (
         payload.get("url")
+        or payload.get("source_url")
         or payload.get("source")
         or payload.get("youtube_url")
         or ""
