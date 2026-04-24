@@ -119,6 +119,9 @@ class QdrantStore:
                 print(f"qdrant ensure_payload_indexes({self.collection}.{field}) skipped: {exc}")
 
     def upsert(self, points: list[dict], wait: bool = True) -> None:
+        # Đảm bảo collection tồn tại trước khi đẩy dữ liệu (phòng trường hợp bị xoá khi server đang chạy)
+        self.ensure_collection()
+
         for i in range(0, len(points), UPSERT_BATCH):
             batch = points[i : i + UPSERT_BATCH]
             formatted = [
@@ -161,6 +164,7 @@ class QdrantStore:
         return result.get("result", {}).get("points", [])
 
     def delete_by_filter(self, filter: dict) -> None:
+        self.ensure_collection()
         self._req("POST", f"/collections/{self.collection}/points/delete", {"filter": filter})
 
 
