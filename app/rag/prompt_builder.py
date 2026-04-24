@@ -451,12 +451,31 @@ def build_documents_block(hits: list[Hit]) -> str:
     return "\n".join(parts)
 
 
+_EXCERPT_MAX_CHARS = 320
+
+
+def _build_excerpt(text: str) -> str:
+    """Cắt trích đoạn hiển thị ở FE: collapse whitespace + giới hạn độ dài."""
+    if not text:
+        return ""
+    normalized = " ".join(text.split())
+    if len(normalized) <= _EXCERPT_MAX_CHARS:
+        return normalized
+    return normalized[:_EXCERPT_MAX_CHARS].rstrip() + "…"
+
+
 def build_sources_mapping(hits: list[Hit]) -> list[dict]:
-    """Dedup source mapping phẳng cho FE render."""
+    """Dedup source mapping phẳng cho FE render.
+
+    Mỗi position được gắn kèm ``excerpt`` — đoạn text gốc của chunk tại vị trí
+    đó (trang với tài liệu, timestamp với video) để FE hiển thị minh chứng
+    trực tiếp ngay dưới nguồn tham khảo.
+    """
     seen: dict[str, dict] = {}
     for hit in hits:
         fields = _resolve_source_fields(hit.payload)
         key = f"{fields['title']}||{fields['base_url']}"
+        excerpt = _build_excerpt(hit.text)
         if key not in seen:
             seen[key] = {
                 "source_type": hit.source_type,
@@ -469,24 +488,45 @@ def build_sources_mapping(hits: list[Hit]) -> list[dict]:
                 "timestamp": fields["ts_display"],
                 "timestamp_secs": fields["ts_secs"],
                 "score": hit.score,
+                "excerpt": excerpt,
                 "positions": [],
             }
         entry = seen[key]
         if hit.score > entry["score"]:
             entry["score"] = hit.score
+            if excerpt:
+                entry["excerpt"] = excerpt
+        elif not entry.get("excerpt") and excerpt:
+            entry["excerpt"] = excerpt
+
         if fields["ts_display"] is not None:
-            pos = {
-                "timestamp": fields["ts_display"],
-                "url": _build_youtube_url_with_timestamp(
-                    fields["base_url"], fields["ts_secs"]
-                ),
-            }
-            if pos not in entry["positions"]:
-                entry["positions"].append(pos)
+            existing = next(
+                (p for p in entry["positions"] if p.get("timestamp") == fields["ts_display"]),
+                None,
+            )
+            if existing is None:
+                entry["positions"].append(
+                    {
+                        "timestamp": fields["ts_display"],
+                        "url": _build_youtube_url_with_timestamp(
+                            fields["base_url"], fields["ts_secs"]
+                        ),
+                        "excerpt": excerpt,
+                    }
+                )
+            elif not existing.get("excerpt") and excerpt:
+                existing["excerpt"] = excerpt
         if fields["page"] is not None:
-            pos = {"page": fields["page"]}
-            if pos not in entry["positions"]:
-                entry["positions"].append(pos)
+            existing = next(
+                (p for p in entry["positions"] if p.get("page") == fields["page"]),
+                None,
+            )
+            if existing is None:
+                entry["positions"].append(
+                    {"page": fields["page"], "excerpt": excerpt}
+                )
+            elif not existing.get("excerpt") and excerpt:
+                existing["excerpt"] = excerpt
 
     mapping: list[dict] = []
     for idx, entry in enumerate(seen.values(), 1):
@@ -504,6 +544,7 @@ def build_sources_mapping(hits: list[Hit]) -> list[dict]:
                 "page": entry.get("page"),
                 "timestamp": entry.get("timestamp"),
                 "score": entry["score"],
+                "excerpt": entry.get("excerpt", ""),
                 "positions": entry["positions"],
             }
         )
@@ -523,11 +564,28 @@ _TASK_REMINDER = (
     "</task>"
 )
 
-def build_user_turn(query: str, docs_block: str, conv_block: str) -> str:
+# Hint khi retriever trả hit nhưng top-score thấp — thay cho hard-refuse cũ.
+# Claude đọc hint + áp <refusal_protocol> nếu tài liệu thực sự không liên quan,
+# hoặc trả lời cẩn trọng nếu có phần nào khớp (vd: title match nhưng chunk ít nội dung).
+_LOW_CONFIDENCE_HINT = (
+    "<retrieval_confidence>low</retrieval_confidence>\n"
+    "LƯU Ý: độ tương đồng giữa câu hỏi và tài liệu truy xuất đang THẤP. "
+    "Kiểm tra kỹ <retrieved_documents> có thật sự trả lời được câu hỏi không — "
+    "nếu không, áp dụng <refusal_protocol>. Không suy đoán từ kiến thức chung."
+)
+
+
+def build_user_turn(
+    query: str,
+    docs_block: str,
+    conv_block: str,
+    low_confidence: bool = False,
+) -> str:
     """Ráp user message cuối theo pattern long-context của Anthropic.
 
-    Thứ tự: documents (top) → conversation context → task reminder → query (bottom).
-    Query ở cuối tăng chất lượng tới ~30% (per Anthropic long-context tips).
+    Thứ tự: documents (top) → conversation context → [low-conf hint] → task
+    reminder → query (bottom). Query ở cuối tăng chất lượng tới ~30% (per
+    Anthropic long-context tips).
     """
     parts: list[str] = []
     if docs_block:
@@ -537,6 +595,8 @@ def build_user_turn(query: str, docs_block: str, conv_block: str) -> str:
     # Chỉ gắn reminder khi có context phía trên — với câu xã giao không retrieve
     # thì không cần, tránh buộc refusal sai.
     if docs_block or conv_block:
+        if low_confidence:
+            parts.append(_LOW_CONFIDENCE_HINT)
         parts.append(_TASK_REMINDER)
     parts.append(f"Câu hỏi của tôi: {query.strip()}")
     return "\n\n".join(parts)

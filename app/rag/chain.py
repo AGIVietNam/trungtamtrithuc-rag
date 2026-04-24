@@ -44,13 +44,13 @@ _TRAILING_NUMBERED_PATTERN = re.compile(
     re.DOTALL,
 )
 
-# Ngưỡng top rerank score tối thiểu để coi là có context trả lời.
-# Dưới ngưỡng → trả refusal cứng (không gọi Claude, tránh hallucinate từ training data).
-# BGE reranker score: >0.5 rất liên quan; 0.0-0.5 mờ; <0 không liên quan.
-# 0.18 (hạ từ 0.25) — thả lỏng cho query overview/liệt kê match được một chunk
-# cụ thể; <refusal_protocol> trong system prompt vẫn là lớp chặn cuối nếu doc
-# thực sự không nói tới chủ đề.
-_MIN_CONFIDENCE_TO_ANSWER: float = 0.01
+# Refusal policy — chỉ hard-refuse khi retriever KHÔNG trả về hit nào.
+# Trước đây có ngưỡng top_score (0.01 / 0.05 / 0.18) chặn cứng trước khi gọi
+# Claude, nhưng BGE reranker cho score thấp/âm với query ngắn (vd "bài này
+# chill phết") dù chunk thật sự liên quan → refuse sai.
+# Giờ đẩy quyết định refuse sang Claude qua <refusal_protocol> + confidence
+# hint trong user_turn — Claude thấy context yếu thì tự từ chối mềm.
+_LOW_CONFIDENCE_SCORE: float = 0.15  # dưới ngưỡng này → chèn hint "low confidence"
 
 _REFUSAL_TEMPLATE = (
     "Tài liệu TDI hiện chưa có thông tin về câu hỏi này.\n\n"
@@ -61,12 +61,25 @@ _REFUSAL_TEMPLATE = (
 )
 
 
+# Ngưỡng score tối thiểu để một nguồn được hiển thị ở phía dưới câu trả lời (FE).
+# Giúp loại bỏ các nguồn "cố đấm ăn xôi" có điểm thấp nhưng vẫn lọt vào context.
+_MIN_SOURCE_SCORE_TO_SHOW: float = 0.2
+_MAX_SOURCES_TO_SHOW: int = 2
+
 def _should_refuse(hits: list) -> bool:
-    """True khi không có hit nào hoặc top score dưới ngưỡng tin cậy."""
+    """True chỉ khi retriever không trả về hit nào.
+
+    Score thấp KHÔNG còn là lý do refuse cứng — để Claude tự quyết qua
+    <refusal_protocol> + confidence hint trong user_turn.
+    """
+    return not hits
+
+
+def _top_score(hits: list) -> float:
     if not hits:
-        return True
-    top = hits[0].score if hits[0].score is not None else 0.0
-    return top < _MIN_CONFIDENCE_TO_ANSWER
+        return 0.0
+    s = hits[0].score
+    return s if s is not None else 0.0
 
 
 def _parse_numbered_questions(raw: str) -> list[str]:
@@ -151,14 +164,16 @@ class RAGChain:
         history = history or []
         t0 = time.perf_counter()
 
-        # --- 1. Query rewrite (Haiku) — anaphora-conditional, skip nếu query
-        # tự đứng được (xem conv_query_rewriter._has_anaphora). Cắt 1-3s/turn.
+        # --- 1. Query rewrite (Haiku) — 2 chiến lược:
+        #   * Anaphora (cần history): resolve đại từ "cái đó/nó/...".
+        #   * Short-query expansion (không cần history): mở rộng câu ngắn
+        #     thiếu intent ("bài này chill phết" → "Thông tin về bài hát ...").
+        # Rewriter tự quyết skip nếu query đủ dài / đủ intent (~1-3s save).
         search_query = query
-        if conv_memory is not None and user_id and history:
-            try:
-                search_query = rewrite_query(self.claude, query, history)
-            except Exception:
-                search_query = query
+        try:
+            search_query = rewrite_query(self.claude, query, history or [])
+        except Exception:
+            search_query = query
         t_rewrite = time.perf_counter()
 
         # --- 2. Embed query 1 LẦN, reuse cho cả retriever + conv_memory.
@@ -229,7 +244,8 @@ class RAGChain:
         conv_block = build_conversation_block(summary, recall_pairs)
         source_mapping = build_sources_mapping(hits)
 
-        user_turn = build_user_turn(query, docs_block, conv_block)
+        low_conf = _top_score(hits) < _LOW_CONFIDENCE_SCORE
+        user_turn = build_user_turn(query, docs_block, conv_block, low_confidence=low_conf)
         messages = list(history) + [{"role": "user", "content": user_turn}]
 
         answer_text = self.claude.generate(
@@ -255,9 +271,13 @@ class RAGChain:
         if suggested_questions and len(clean_answer) >= len(answer_text):
             final_answer += "\n\n--- GỢI Ý ---\n" + "\n".join([f"{i+1}. {q}" for i, q in enumerate(suggested_questions)])
 
+        # Lọc nguồn: Chỉ lấy các nguồn có điểm cao và giới hạn số lượng hiển thị
+        filtered_sources = [s for s in source_mapping if s["score"] >= _MIN_SOURCE_SCORE_TO_SHOW]
+        filtered_sources = filtered_sources[:_MAX_SOURCES_TO_SHOW]
+
         return {
             "answer": final_answer,
-            "sources": source_mapping if has_sources else [],
+            "sources": filtered_sources if has_sources else [],
             "confidence": _confidence(top_score),
             "suggested_questions": suggested_questions,
             "rewritten_query": search_query if search_query != query else None,
@@ -278,12 +298,13 @@ class RAGChain:
         history = history or []
         t0 = time.perf_counter()
 
+        # Rewrite: anaphora (cần history) + short-query expansion (không cần
+        # history) — xem chi tiết trong conv_query_rewriter.rewrite.
         search_query = query
-        if conv_memory is not None and user_id and history:
-            try:
-                search_query = rewrite_query(self.claude, query, history)
-            except Exception:
-                search_query = query
+        try:
+            search_query = rewrite_query(self.claude, query, history or [])
+        except Exception:
+            search_query = query
         t_rewrite = time.perf_counter()
 
         # Embed query 1 lần, reuse cho retriever + conv_memory.
@@ -349,7 +370,8 @@ class RAGChain:
         conv_block = build_conversation_block(summary, recall_pairs)
         source_mapping = build_sources_mapping(hits)
 
-        user_turn = build_user_turn(query, docs_block, conv_block)
+        low_conf = _top_score(hits) < _LOW_CONFIDENCE_SCORE
+        user_turn = build_user_turn(query, docs_block, conv_block, low_confidence=low_conf)
         messages = list(history) + [{"role": "user", "content": user_turn}]
 
         top_score = hits[0].score if hits else 0.0
@@ -372,9 +394,13 @@ class RAGChain:
         clean_answer, suggested_questions = _extract_suggestions(full_text)
         has_sources = "Nguồn:" in clean_answer or "nguồn:" in clean_answer.lower()
 
+        # Lọc nguồn: Chỉ lấy các nguồn có điểm cao và giới hạn số lượng hiển thị
+        filtered_sources = [s for s in source_mapping if s["score"] >= _MIN_SOURCE_SCORE_TO_SHOW]
+        filtered_sources = filtered_sources[:_MAX_SOURCES_TO_SHOW]
+
         yield {
             "type": "done",
             "answer": full_text,
-            "sources": source_mapping if has_sources else [],
+            "sources": filtered_sources if has_sources else [],
             "suggested_questions": suggested_questions,
         }

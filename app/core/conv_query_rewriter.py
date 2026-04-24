@@ -1,11 +1,15 @@
-"""Rewrite follow-up queries thành standalone queries (Haiku).
+"""Rewrite follow-up / short queries thành standalone queries (Haiku).
 
-Tiếng Việt có rất nhiều zero anaphora (câu lược chủ ngữ):
-  "Còn tiền không?", "Làm sao đây?", "Cái đó thế nào?"
-Những câu này embed ra vector gần như vô nghĩa ngữ cảnh.
-Cần rewrite bằng Haiku + 2 turn gần nhất → câu đầy đủ chủ ngữ.
+2 chiến lược rewrite — trigger độc lập, cùng dùng Haiku:
 
-Nếu query đã dài/đầy đủ → không rewrite (tiết kiệm).
+1. **Anaphora rewrite** (cần history): câu lược chủ ngữ / dùng đại từ
+   ("Còn tiền không?", "Cái đó thế nào?") → resolve về danh từ cụ thể từ
+   2 turn gần nhất.
+
+2. **Short-query expansion** (không cần history): câu rất ngắn, thiếu
+   interrogative intent ("bài này chill phết", "báo cáo Q1", "tên sếp") →
+   expand thành câu hỏi đầy đủ để embed khớp hơn với document chunks.
+   Fix case dense embedding yếu với title/keyword match query.
 """
 from __future__ import annotations
 
@@ -35,9 +39,44 @@ _ANAPHORA_MARKERS = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+# Interrogative / question markers tiếng Việt. Query có ít nhất 1 marker →
+# đã tự mang intent hỏi → embedding sẽ khớp chunk dạng "câu trả lời" tốt hơn.
+# Query thiếu HẾT các marker này + lại ngắn → có thể là statement/title-match
+# ("bài này chill phết") → cần expand để gần với intent-based document chunks.
+_QUESTION_MARKERS = re.compile(
+    r"(?:^|\W)("
+    r"\?|"
+    r"ai|gì|nào|sao|đâu|"
+    r"bao\s*(?:nhiêu|lâu|giờ)|"
+    r"khi\s+nào|lúc\s+nào|ở\s+đâu|"
+    r"thế\s+nào|như\s+thế\s+nào|ra\s+sao|làm\s+sao|"
+    r"có\s+.+?\s+(?:không|chưa|chăng)|"
+    r"là\s+gì|là\s+ai|"
+    r"phải\s+(?:không|chăng)|"
+    r"vì\s+sao|tại\s+sao|do\s+đâu|"
+    r"bao\s+gồm|gồm\s+(?:gì|những\s+gì)|"
+    r"có\s+(?:những|mấy)\s+"
+    r")(?:\W|$)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Query ngắn dưới ngưỡng này (token count) + không có question marker →
+# trigger short-query expansion. 5 = "bài này chill phết" (4 tokens) +
+# biên an toàn cho "báo cáo tài chính Q1" (5 tokens).
+_SHORT_QUERY_MAX_TOKENS = 5
+
 
 def _has_anaphora(text: str) -> bool:
     return bool(_ANAPHORA_MARKERS.search(text))
+
+
+def _has_question_intent(text: str) -> bool:
+    return bool(_QUESTION_MARKERS.search(text))
+
+
+def _is_short_query(text: str) -> bool:
+    return len(text.split()) <= _SHORT_QUERY_MAX_TOKENS
+
 
 _SYSTEM_PROMPT = (
     "Bạn là module rewrite câu hỏi tiếng Việt thành câu đầy đủ (standalone).\n\n"
@@ -50,6 +89,24 @@ _SYSTEM_PROMPT = (
     "- Tiếng Việt tự nhiên.\n"
     "- Giữ NGUYÊN ý định của user, không đoán thêm.\n"
     "- Nếu câu hỏi đã đầy đủ rồi, trả về nguyên văn.\n"
+    "- Trả về CHỈ câu đã rewrite, không giải thích, không prefix."
+)
+
+_EXPAND_SYSTEM_PROMPT = (
+    "Bạn là module mở rộng câu truy vấn tiếng Việt NGẮN thành câu hỏi đầy đủ.\n\n"
+    "Câu truy vấn người dùng rất ngắn (ví dụ: tên bài hát, tên tài liệu, mã sản phẩm, "
+    "tên người, cụm từ khoá) — thiếu intent hỏi rõ ràng nên embedding yếu, khó khớp "
+    "với chunks tài liệu dạng câu đầy đủ.\n\n"
+    "Nhiệm vụ: viết lại thành 1 câu hỏi tiếng Việt rõ intent, GIỮ NGUYÊN mọi keyword "
+    "gốc, chỉ bổ sung từ khoá intent (của ai / là gì / như thế nào / nội dung / thông tin về...).\n\n"
+    "VÍ DỤ:\n"
+    "- 'bài này chill phết' → 'Thông tin về bài hát \"Bài này chill phết\" là gì?'\n"
+    "- 'báo cáo Q1' → 'Nội dung báo cáo Q1 như thế nào?'\n"
+    "- 'authen teams' → 'Authen Teams là gì và dùng như thế nào?'\n"
+    "- 'quy trình onboard' → 'Quy trình onboard nhân viên mới như thế nào?'\n\n"
+    "QUY TẮC:\n"
+    "- KHÔNG đổi keyword gốc, KHÔNG dịch, KHÔNG đoán nội dung.\n"
+    "- Không thêm tên công ty, domain, hay ngữ cảnh không có trong câu gốc.\n"
     "- Trả về CHỈ câu đã rewrite, không giải thích, không prefix."
 )
 
@@ -66,49 +123,63 @@ def _format_recent(recent_turns: list[dict], limit: int = 4) -> str:
     return "\n".join(lines)
 
 
+def _call_haiku(
+    claude: ClaudeClient,
+    system_prompt: str,
+    user_content: str,
+    query: str,
+    mode: str,
+) -> str:
+    """Gọi Haiku + guardrail chiều dài. Fail → trả query gốc."""
+    try:
+        rewritten = claude.quick_text(
+            system_prompt=system_prompt,
+            user_content=user_content,
+            max_tokens=150,
+            model=CLAUDE_HAIKU_MODEL,
+        ).strip()
+        if not rewritten or len(rewritten) > len(query) * 8:
+            return query
+        logger.info("query rewritten (%s): %r → %r", mode, query, rewritten)
+        return rewritten
+    except Exception:
+        logger.warning("query rewrite failed (%s), using original", mode, exc_info=True)
+        return query
+
+
 def rewrite(
     claude: ClaudeClient,
     query: str,
     recent_turns: list[dict],
 ) -> str:
-    """Rewrite query thành standalone. Không có context → trả nguyên."""
+    """Rewrite query → standalone.
+
+    Thứ tự trigger:
+      1. Anaphora (có history) → resolve đại từ từ context.
+      2. Short query thiếu intent → expand thành câu hỏi đầy đủ.
+      3. Query đủ dài / đủ intent → giữ nguyên.
+    """
     query = query.strip()
     if not query:
         return query
 
-    # Không có history → không cần rewrite
-    if not recent_turns:
-        return query
-
-    # Query đã đủ dài → có khả năng đã tự chứa đủ ngữ cảnh
+    # Query đã đủ dài → tự chứa đủ ngữ cảnh, không rewrite.
     if len(query) >= CONV_REWRITE_MIN_LEN:
         return query
 
-    # Conditional rewrite: chỉ gọi Haiku khi query có dấu hiệu anaphora.
-    # Câu ngắn nhưng đã đầy đủ chủ ngữ (vd "Doanh thu Q1 bao nhiêu?")
-    # đứng độc lập được — embed thẳng, save 1 round-trip Haiku ~1-3s.
-    if not _has_anaphora(query):
-        return query
-
-    try:
+    # 1. Anaphora rewrite — cần history để resolve.
+    if recent_turns and _has_anaphora(query):
         user_content = (
             f"Context (2 lượt gần nhất):\n{_format_recent(recent_turns)}\n\n"
             f"Câu hỏi mới: {query}\n\n"
             f"Câu rewrite:"
         )
-        rewritten = claude.quick_text(
-            system_prompt=_SYSTEM_PROMPT,
-            user_content=user_content,
-            max_tokens=150,
-            model=CLAUDE_HAIKU_MODEL,
-        ).strip()
+        return _call_haiku(claude, _SYSTEM_PROMPT, user_content, query, mode="anaphora")
 
-        # Guardrail: nếu rewrite quá dài, giữ nguyên query gốc
-        if len(rewritten) > len(query) * 8 or not rewritten:
-            return query
+    # 2. Short-query expansion — không cần history. Fix dense embedding yếu
+    # với query ngắn thiếu intent (title-match, keyword, tên riêng).
+    if _is_short_query(query) and not _has_question_intent(query):
+        user_content = f"Câu truy vấn ngắn: {query}\n\nCâu hỏi mở rộng:"
+        return _call_haiku(claude, _EXPAND_SYSTEM_PROMPT, user_content, query, mode="expand")
 
-        logger.info("query rewritten: %r → %r", query, rewritten)
-        return rewritten
-    except Exception:
-        logger.warning("query rewrite failed, using original", exc_info=True)
-        return query
+    return query

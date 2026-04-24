@@ -71,6 +71,17 @@
     font-family: 'JetBrains Mono', monospace;
   }
   a.pos-tag:hover { background: #c3c0ff; }
+  .src-excerpt {
+    font-size: 0.78rem; line-height: 1.5; color: #464555;
+    background: #fbfaff; border-left: 2px solid #c7c4d8;
+    padding: 0.5rem 0.75rem; border-radius: 4px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .src-excerpt-label {
+    font-size: 0.62rem; font-weight: 600; letter-spacing: 0.06em;
+    text-transform: uppercase; color: #777587;
+    font-family: 'JetBrains Mono', monospace; margin-bottom: 0.25rem;
+  }
 
   /* Typing animation */
   .typing span { display: inline-block; width: 6px; height: 6px; background: #777587; border-radius: 50%; margin: 0 1px; animation: blink 1.2s infinite both; }
@@ -367,6 +378,14 @@
     return escapeHTML(trimmed);
   }
 
+  function buildExcerptHTML(excerpt, label) {
+    if (!excerpt) return '';
+    const text = String(excerpt).trim();
+    if (!text) return '';
+    const lbl = label ? `<div class="src-excerpt-label">${escapeHTML(label)}</div>` : '';
+    return `<div class="mt-2">${lbl}<div class="src-excerpt">${escapeHTML(text)}</div></div>`;
+  }
+
   function buildSourcesHTML(sources) {
     if (!sources || !sources.length) return '';
     const items = sources.map(src => {
@@ -375,41 +394,52 @@
       const score = src.score ?? src.confidence;
       const conf = confInfo(score);
       const badge = conf ? `<span class="conf-tag ${conf.cls}">${conf.label}</span>` : '';
+      const isVideo = src.source_type === 'video' || src.source_type === 'vmedia';
+      const iconName = isVideo ? 'play_circle' : 'description';
 
-      let posHTML = '';
+      let posBlocks = '';
       const positions = src.positions || [];
       if (positions.length > 0) {
-        const tags = positions.map(p => {
+        posBlocks = positions.map(p => {
+          let tag = '';
+          let excerptLabel = '';
           if (p.timestamp) {
             const ts = escapeHTML(p.timestamp);
             const href = safeHref(p.url) || baseHref;
-            return href
+            tag = href
               ? `<a href="${href}" target="_blank" rel="noopener" class="pos-tag">&#9654; ${ts}</a>`
               : `<span class="pos-tag">&#9654; ${ts}</span>`;
-          }
-          if (p.page != null) {
+            excerptLabel = `Trích tại ${p.timestamp}`;
+          } else if (p.page != null) {
             const pageNum = escapeHTML(String(p.page));
             const pageHref = baseHref ? `${baseHref}#page=${encodeURIComponent(p.page)}` : '';
-            return pageHref
+            tag = pageHref
               ? `<a href="${pageHref}" target="_blank" rel="noopener" class="pos-tag">&#128196; Trang ${pageNum}</a>`
               : `<span class="pos-tag">&#128196; Trang ${pageNum}</span>`;
+            excerptLabel = `Trích từ trang ${p.page}`;
+          } else {
+            return '';
           }
-          return '';
+          const excerptHTML = buildExcerptHTML(p.excerpt, excerptLabel);
+          return `<div class="mt-2"><div class="flex flex-wrap gap-1">${tag}</div>${excerptHTML}</div>`;
         }).filter(Boolean).join('');
-        if (tags) posHTML = `<div class="flex flex-wrap gap-1 mt-1">${tags}</div>`;
       } else if (src.timestamp) {
         const ts = escapeHTML(src.timestamp);
         const tag = baseHref
           ? `<a href="${baseHref}" target="_blank" rel="noopener" class="pos-tag">&#9654; ${ts}</a>`
           : `<span class="pos-tag">&#9654; ${ts}</span>`;
-        posHTML = `<div class="flex flex-wrap gap-1 mt-1">${tag}</div>`;
+        const excerptHTML = buildExcerptHTML(src.excerpt, `Trích tại ${src.timestamp}`);
+        posBlocks = `<div class="mt-2"><div class="flex flex-wrap gap-1">${tag}</div>${excerptHTML}</div>`;
       } else if (src.page != null) {
         const pageNum = escapeHTML(String(src.page));
         const pageHref = baseHref ? `${baseHref}#page=${encodeURIComponent(src.page)}` : '';
         const tag = pageHref
           ? `<a href="${pageHref}" target="_blank" rel="noopener" class="pos-tag">&#128196; Trang ${pageNum}</a>`
           : `<span class="pos-tag">&#128196; Trang ${pageNum}</span>`;
-        posHTML = `<div class="flex flex-wrap gap-1 mt-1">${tag}</div>`;
+        const excerptHTML = buildExcerptHTML(src.excerpt, `Trích từ trang ${src.page}`);
+        posBlocks = `<div class="mt-2"><div class="flex flex-wrap gap-1">${tag}</div>${excerptHTML}</div>`;
+      } else if (src.excerpt) {
+        posBlocks = buildExcerptHTML(src.excerpt, 'Trích đoạn');
       }
 
       const titleHTML = baseHref
@@ -418,10 +448,10 @@
 
       return `
         <div class="flex items-start gap-3 p-3 rounded-lg bg-surface-container-low ghost-border hover:shadow-[0_4px_12px_-4px_rgba(15,23,42,0.08)] transition-all">
-          <span class="material-symbols-outlined text-on-surface-variant text-[18px] mt-0.5">description</span>
+          <span class="material-symbols-outlined text-on-surface-variant text-[18px] mt-0.5">${iconName}</span>
           <div class="flex-1 min-w-0 flex flex-col gap-0.5">
             <div class="text-sm truncate">${titleHTML}</div>
-            ${posHTML}
+            ${posBlocks}
           </div>
           ${badge}
         </div>`;
