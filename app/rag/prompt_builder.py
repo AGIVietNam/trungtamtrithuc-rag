@@ -284,11 +284,20 @@ Khi câu trả lời có nội dung kiến thức, sau mục "Nguồn:" thêm đ
 2. <câu hỏi 2>
 3. <câu hỏi 3>
 
-Yêu cầu câu hỏi gợi ý:
-- Rút ra trực tiếp từ nội dung trong <retrieved_documents> vừa dùng, hoặc từ
-  chủ đề user đang trao đổi — không phải câu hỏi generic trong ngành.
-- Gợi ra hướng đào sâu hoặc mở rộng tự nhiên từ câu trả lời vừa viết.
-- Ngắn gọn, đúng như một câu hỏi thật của user (xưng "tôi", không phải bot nói về bot).
+QUY TẮC TUYỆT ĐỐI — gợi ý PHẢI trả lời được bằng chính <retrieved_documents>
+vừa đọc, không được "gợi ý xuông":
+- Mỗi câu hỏi gợi ý phải hỏi về MỘT chi tiết, bước, thông số, khái niệm HOẶC
+  phần phụ đã xuất hiện nguyên văn trong <retrieved_documents>. Nếu không
+  chắc trong docs có câu trả lời → KHÔNG đưa câu đó vào gợi ý.
+- CẤM gợi ý câu hỏi mở rộng ra lĩnh vực khác, so sánh với sản phẩm/quy trình
+  không xuất hiện trong docs, hoặc hỏi chung chung (vd "còn cách nào khác
+  không?", "có lưu ý gì không?") nếu docs không nêu cụ thể.
+- CẤM gợi ý câu hỏi mà câu trả lời vừa viết đã trả lời xong — tránh lặp.
+- Nếu docs chỉ chứa 0-1 ý đủ để gợi ý: cho phép xuất 0-2 câu thay vì ép đủ 3.
+  Thà thiếu còn hơn bịa câu không trả lời được.
+- Ngắn gọn, xưng "tôi" như user thật hỏi (không phải bot nói về bot).
+- Tự kiểm tra lần cuối trước khi xuất: với từng câu gợi ý, thầm tìm đoạn
+  trong <retrieved_documents> có thể trả lời nó — nếu không thấy, bỏ câu đó.
 </followup_suggestions>
 """
 
