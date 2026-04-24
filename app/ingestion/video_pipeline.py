@@ -9,7 +9,7 @@ from pathlib import Path
 from app.core import config
 from app.core.chunker import chunk_transcript_with_timestamps
 from app.core.voyage_embed import VoyageEmbedder
-from app.core.qdrant_store import QdrantStore, QdrantRegistry, PERSONA_TO_DOMAIN
+from app.core.qdrant_store import QdrantStore, QdrantRegistry, PERSONA_TO_DOMAIN, DOMAINS
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +38,10 @@ def _resolve_domain_store(metadata: dict | None) -> QdrantStore:
             "metadata['domain'] là bắt buộc khi ingest video — "
             "hãy chọn lĩnh vực ở form upload."
         )
-    if domain_key not in PERSONA_TO_DOMAIN:
+    if domain_key not in PERSONA_TO_DOMAIN and domain_key not in DOMAINS:
         raise ValueError(
             f"domain={domain_key!r} không hợp lệ. "
-            f"Chọn 1 trong: {list(PERSONA_TO_DOMAIN.keys())}"
+            f"Chọn 1 trong: {DOMAINS} (slug) hoặc {list(PERSONA_TO_DOMAIN.keys())} (persona)."
         )
     return _get_registry().get_by_persona(domain_key, "videos")
 
