@@ -7,17 +7,19 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
+from app.config import CLAUDE_HAIKU_MODEL
 from app.core.claude_client import ClaudeClient
 from app.core.conv_memory import ConversationMemory
 from app.core.conv_query_rewriter import rewrite as rewrite_query
+from app.rag.faithfulness import check_faithfulness
 from app.rag.retriever import Retriever
 from app.rag.reranker import CrossEncoderReranker
 from app.rag.prompt_builder import (
     build_system_prompt,
-    build_documents_block,
+    build_documents_blocks,
     build_sources_mapping,
     build_conversation_block,
-    build_user_turn,
+    build_user_content,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,13 +46,20 @@ _TRAILING_NUMBERED_PATTERN = re.compile(
     re.DOTALL,
 )
 
-# Refusal policy — chỉ hard-refuse khi retriever KHÔNG trả về hit nào.
-# Trước đây có ngưỡng top_score (0.01 / 0.05 / 0.18) chặn cứng trước khi gọi
-# Claude, nhưng BGE reranker cho score thấp/âm với query ngắn (vd "bài này
-# chill phết") dù chunk thật sự liên quan → refuse sai.
-# Giờ đẩy quyết định refuse sang Claude qua <refusal_protocol> + confidence
-# hint trong user_turn — Claude thấy context yếu thì tự từ chối mềm.
-_LOW_CONFIDENCE_SCORE: float = 0.15  # dưới ngưỡng này → chèn hint "low confidence"
+# Refusal/confidence policy (Phase 2 — sigmoid scale).
+# Reranker giờ trả sigmoid score ∈ [0,1]. Threshold mới:
+#
+#   sigmoid >= 0.7  → high confidence (Claude trả lời tự nhiên)
+#   sigmoid 0.4-0.7 → medium (default — Claude tự cẩn trọng qua _BASE_RULES)
+#   sigmoid < 0.6   → chèn _LOW_CONFIDENCE_HINT vào user_turn (gentle warning)
+#   sigmoid < 0.4   → HARD REFUSE pre-Claude (tiết kiệm 1 Claude call,
+#                     tránh hallucinate "stretch context")
+#
+# Rationale: với BGE v2-m3, sigmoid 0.4 ≈ raw logit -0.4 → "rõ ràng không
+# liên quan". Trước đây giữ Claude tự refuse mềm dẫn đến bug BKVN —
+# Claude vẫn cố trả lời từ chunk top-1 yếu rồi bịa fact.
+_LOW_CONFIDENCE_SCORE: float = 0.6
+_HARD_REFUSE_SCORE: float = 0.4
 
 _REFUSAL_TEMPLATE = (
     "Tài liệu TDI hiện chưa có thông tin về câu hỏi này.\n\n"
@@ -66,13 +75,113 @@ _REFUSAL_TEMPLATE = (
 _MIN_SOURCE_SCORE_TO_SHOW: float = 0.2
 _MAX_SOURCES_TO_SHOW: int = 2
 
-def _should_refuse(hits: list) -> bool:
-    """True chỉ khi retriever không trả về hit nào.
+# Citations API gating — Phase 1 anti-hallucination layer.
+# Khi Claude trả lời câu KIẾN THỨC dài (>= ngưỡng) nhưng KHÔNG cite chunk
+# nào → nhiều khả năng hallucinate. Replace bằng refusal template.
+# Ngưỡng 100 chars nhỏ đủ để câu xã giao ("Chào bạn!") không bị refuse oan.
+_MIN_ANSWER_LEN_REQUIRE_CITATION: int = 100
+# Ngưỡng tỉ lệ câu không-cite tối đa cho phép. Tính trên text blocks: nếu
+# > 60% câu không có citation kèm → coi như hallucinate. 0.6 lỏng vì câu
+# tiếng Việt ngắn + intro/transitions chính đáng không cần cite.
+_MAX_UNCITED_SENTENCE_RATIO: float = 0.6
 
-    Score thấp KHÔNG còn là lý do refuse cứng — để Claude tự quyết qua
-    <refusal_protocol> + confidence hint trong user_turn.
+# Marker để nhận biết answer đang là refusal template (đã viết bởi Claude
+# hoặc inject thủ công) — KHÔNG enforce citation requirement nữa.
+_REFUSAL_PREFIX = "Tài liệu TDI hiện chưa có thông tin"
+
+
+def _should_refuse(hits: list) -> bool:
+    """True khi retriever rỗng HOẶC top sigmoid < _HARD_REFUSE_SCORE.
+
+    Phase 2 đổi từ "luôn để Claude tự quyết" sang "hard gate khi rerank
+    quá yếu". Lý do: với BGE v2-m3 score sigmoid < 0.4 nghĩa là chunk top-1
+    thực sự không liên quan — để Claude xử lý chỉ tốn API call và risk
+    hallucinate stretch (BKVN bug case).
+
+    Caller bypass-able: ``_HARD_REFUSE_SCORE = 0`` → quay về behaviour cũ.
     """
-    return not hits
+    if not hits:
+        return True
+    if hits[0].score < _HARD_REFUSE_SCORE:
+        logger.info(
+            "hard refuse: top sigmoid=%.4f < %.2f (hits=%d) → skip Claude call",
+            hits[0].score, _HARD_REFUSE_SCORE, len(hits),
+        )
+        return True
+    return False
+
+
+def _looks_like_refusal(text: str) -> bool:
+    """Detect Claude tự áp <refusal_protocol> theo template trong _BASE_RULES."""
+    return bool(text) and text.lstrip().startswith(_REFUSAL_PREFIX)
+
+
+def _looks_like_smalltalk(text: str) -> bool:
+    """Câu xã giao ngắn (chào hỏi, cảm ơn) — không cần cite, không gate."""
+    return bool(text) and len(text.strip()) < _MIN_ANSWER_LEN_REQUIRE_CITATION
+
+
+def _is_hallucinated_uncited(text: str, citations: list) -> bool:
+    """True khi answer dài nhưng cite quá ít → likely hallucinate.
+
+    Logic:
+      - Skip nếu là refusal template (Claude tự refuse).
+      - Skip nếu là câu xã giao ngắn (< _MIN_ANSWER_LEN_REQUIRE_CITATION).
+      - Trip nếu có 0 citation trên answer dài.
+
+    Tỉ lệ câu không-cite chi tiết là KHO sệ tới Phase 3 (HHEM); ở Phase 1
+    chỉ cần coarse "0 citations on long answer".
+    """
+    if _looks_like_refusal(text):
+        return False
+    if _looks_like_smalltalk(text):
+        return False
+    return len(citations) == 0
+
+
+def _build_premise_from_citations(
+    hits: list, citations: list[dict], max_chars: int = 6000
+) -> str:
+    """Ghép text các chunk đã được Claude cite thành 1 premise duy nhất.
+
+    Dùng làm input cho faithfulness gate (Phase 3.3). Premise chỉ chứa text
+    thật sự được cite — KHÔNG nhét all hits vào, để gate đánh giá đúng phần
+    Claude tuyên bố đã đọc.
+    """
+    cited_indices: set[int] = set()
+    for c in citations:
+        idx = c.get("doc_index")
+        if isinstance(idx, int) and 0 <= idx < len(hits):
+            cited_indices.add(idx)
+    if not cited_indices:
+        return ""
+    parts = [hits[i].text.strip() for i in sorted(cited_indices)]
+    joined = "\n\n---\n\n".join(parts)
+    if len(joined) > max_chars:
+        joined = joined[:max_chars] + "…"
+    return joined
+
+
+def _build_sources_from_citations(
+    hits: list, citations: list[dict]
+) -> list[dict]:
+    """Chỉ trả các source thực sự được Claude cite.
+
+    Anthropic ``document_index`` đếm trong content array của user message.
+    Vì ``build_user_content()`` đặt N doc blocks ở vị trí 0..N-1 và 1 text
+    block cuối, doc_index 0..N-1 map trực tiếp sang hits[0..N-1].
+
+    Nếu không có citation → trả [] (caller sẽ refuse hoặc không show source).
+    """
+    cited_indices: set[int] = set()
+    for c in citations:
+        idx = c.get("doc_index")
+        if isinstance(idx, int) and 0 <= idx < len(hits):
+            cited_indices.add(idx)
+    if not cited_indices:
+        return []
+    cited_hits = [hits[i] for i in sorted(cited_indices)]
+    return build_sources_mapping(cited_hits)
 
 
 def _top_score(hits: list) -> float:
@@ -213,6 +322,11 @@ class RAGChain:
         t_retrieve = time.perf_counter()
 
         hits = self.reranker.rerank(search_query, hits, top_k=self.rerank_top_k)
+        # Phase 3.2: rerank conv_memory recall với threshold cao (0.75) —
+        # chặn pair similar-vector nhưng OFF-TOPIC khỏi đầu độc context
+        # (case BKVN: pair "Form thiết kế" recall vào query đăng nhập).
+        if recall_pairs:
+            recall_pairs = self.reranker.rerank_memory(search_query, recall_pairs)
         t_rerank = time.perf_counter()
 
         # --- 3b. Guard: không đủ context → refuse cứng, KHÔNG gọi Claude
@@ -235,34 +349,73 @@ class RAGChain:
                 "refused": True,
             }
 
-        # --- 4. Build prompt:
+        # --- 4. Build prompt (Citations API path):
         # - system: persona + _BASE_RULES (STABLE → cache hit mọi turn sau lượt đầu)
-        # - user turn cuối: <retrieved_documents> + <user_context>/<session_summary>
-        #   + task reminder + query gốc (docs ở top, query ở bottom — long-context tip).
+        # - user message content: list[document_block × N] + 1 text block (conv +
+        #   task + query). Mỗi document block bật ``citations.enabled`` để Claude
+        #   tự cite tới char-range cụ thể trong từng chunk.
         system_prompt = build_system_prompt(expert_domain)
-        docs_block = build_documents_block(hits)
+        doc_blocks = build_documents_blocks(hits)
         conv_block = build_conversation_block(summary, recall_pairs)
-        source_mapping = build_sources_mapping(hits)
 
         low_conf = _top_score(hits) < _LOW_CONFIDENCE_SCORE
-        user_turn = build_user_turn(query, docs_block, conv_block, low_confidence=low_conf)
-        messages = list(history) + [{"role": "user", "content": user_turn}]
+        user_content = build_user_content(query, doc_blocks, conv_block, low_confidence=low_conf)
+        messages = list(history) + [{"role": "user", "content": user_content}]
 
-        answer_text = self.claude.generate(
+        result = self.claude.generate_with_citations(
             system_prompt=system_prompt,
             messages=messages,
         )
+        answer_text = result["text"]
+        citations = result["citations"]
         t_claude = time.perf_counter()
+
+        # --- 4b. Anti-hallucination gate (Phase 1):
+        # Answer dài nhưng KHÔNG cite chunk nào → likely hallucinate. Force refusal.
+        forced_refusal = False
+        forced_reason = ""
+        if hits and _is_hallucinated_uncited(answer_text, citations):
+            logger.warning(
+                "Citations gate TRIPPED: answer_len=%d citations=0 hits=%d "
+                "→ replacing with refusal template (top_score=%.4f)",
+                len(answer_text), len(hits), _top_score(hits),
+            )
+            answer_text = _REFUSAL_TEMPLATE
+            citations = []
+            forced_refusal = True
+            forced_reason = "citations_empty"
+
+        # --- 4c. Faithfulness gate (Phase 3.3) — Haiku 4.5 judge:
+        # Catch case "có citations nhưng paraphrase sai logic / cherry-pick".
+        # Skip nếu đã refuse (Phase 1 hoặc Claude tự refuse).
+        if (
+            citations
+            and not forced_refusal
+            and not _looks_like_refusal(answer_text)
+        ):
+            premise = _build_premise_from_citations(hits, citations)
+            grounded, reason = check_faithfulness(
+                self.claude, premise, answer_text, judge_model=CLAUDE_HAIKU_MODEL,
+            )
+            if not grounded:
+                logger.warning(
+                    "Faithfulness gate TRIPPED: %s | answer_len=%d citations=%d",
+                    reason, len(answer_text), len(citations),
+                )
+                answer_text = _REFUSAL_TEMPLATE
+                citations = []
+                forced_refusal = True
+                forced_reason = f"faithfulness:{reason[:80]}"
 
         clean_answer, suggested_questions = _extract_suggestions(answer_text)
 
         top_score = hits[0].score if hits else 0.0
         logger.info(
             "RAG done: rewrite=%.2fs embed=%.2fs retrieve=%.2fs rerank=%.2fs "
-            "claude=%.2fs total=%.2fs (recall=%s, hits=%d)",
+            "claude=%.2fs total=%.2fs (recall=%s, hits=%d, citations=%d, forced_refuse=%s)",
             t_rewrite - t0, t_embed - t_rewrite, t_retrieve - t_embed,
             t_rerank - t_retrieve, t_claude - t_rerank, t_claude - t0,
-            "yes" if do_recall else "skipped", len(hits),
+            "yes" if do_recall else "skipped", len(hits), len(citations), forced_refusal,
         )
 
         final_answer = answer_text
@@ -270,9 +423,16 @@ class RAGChain:
         if suggested_questions and len(clean_answer) >= len(answer_text):
             final_answer += "\n\n--- GỢI Ý ---\n" + "\n".join([f"{i+1}. {q}" for i, q in enumerate(suggested_questions)])
 
-        # Lọc nguồn: Chỉ lấy các nguồn có điểm cao và giới hạn số lượng hiển thị
-        filtered_sources = [s for s in source_mapping if s["score"] >= _MIN_SOURCE_SCORE_TO_SHOW]
-        filtered_sources = filtered_sources[:_MAX_SOURCES_TO_SHOW]
+        # Sources giờ build từ chunk thực sự được Claude cite, không phải all hits.
+        # Khi forced_refusal hoặc Claude tự refuse → citations rỗng → sources rỗng.
+        # Bỏ filter _MIN_SOURCE_SCORE_TO_SHOW: Citations API ĐÃ verify chunk hữu
+        # ích bằng cách Claude thực sự cite vào — rerank score thấp không có
+        # nghĩa chunk vô dụng (vd query ngắn cho score thấp dù chunk relevant).
+        if citations:
+            cited_sources = _build_sources_from_citations(hits, citations)
+        else:
+            cited_sources = []
+        filtered_sources = cited_sources[:_MAX_SOURCES_TO_SHOW]
 
         return {
             "answer": final_answer,
@@ -281,6 +441,8 @@ class RAGChain:
             "suggested_questions": suggested_questions,
             "rewritten_query": search_query if search_query != query else None,
             "recall_count": len(recall_pairs),
+            "citations_count": len(citations),
+            "forced_refusal": forced_refusal,
         }
 
     def answer_stream(
@@ -338,6 +500,11 @@ class RAGChain:
         t_retrieve = time.perf_counter()
 
         hits = self.reranker.rerank(search_query, hits, top_k=self.rerank_top_k)
+        # Phase 3.2: rerank conv_memory recall với threshold cao (0.75) —
+        # chặn pair similar-vector nhưng OFF-TOPIC khỏi đầu độc context
+        # (case BKVN: pair "Form thiết kế" recall vào query đăng nhập).
+        if recall_pairs:
+            recall_pairs = self.reranker.rerank_memory(search_query, recall_pairs)
         t_rerank = time.perf_counter()
         logger.info(
             "RAG stream pre-llm: rewrite=%.2fs embed=%.2fs retrieve=%.2fs "
@@ -365,13 +532,12 @@ class RAGChain:
             return
 
         system_prompt = build_system_prompt(expert_domain)
-        docs_block = build_documents_block(hits)
+        doc_blocks = build_documents_blocks(hits)
         conv_block = build_conversation_block(summary, recall_pairs)
-        source_mapping = build_sources_mapping(hits)
 
         low_conf = _top_score(hits) < _LOW_CONFIDENCE_SCORE
-        user_turn = build_user_turn(query, docs_block, conv_block, low_confidence=low_conf)
-        messages = list(history) + [{"role": "user", "content": user_turn}]
+        user_content = build_user_content(query, doc_blocks, conv_block, low_confidence=low_conf)
+        messages = list(history) + [{"role": "user", "content": user_content}]
 
         top_score = hits[0].score if hits else 0.0
         yield {
@@ -381,24 +547,67 @@ class RAGChain:
             "recall_count": len(recall_pairs),
         }
 
-        buffer_parts: list[str] = []
-        for chunk in self.claude.generate_stream(
+        # Stream với Citations API: text deltas yield realtime, citations chỉ
+        # hoàn chỉnh sau khi generate_stream_with_citations emit "final" event.
+        full_text = ""
+        citations: list[dict] = []
+        for evt in self.claude.generate_stream_with_citations(
             system_prompt=system_prompt,
             messages=messages,
         ):
-            buffer_parts.append(chunk)
-            yield {"type": "delta", "text": chunk}
+            if evt["type"] == "delta":
+                yield {"type": "delta", "text": evt["text"]}
+            elif evt["type"] == "final":
+                full_text = evt["text"]
+                citations = evt["citations"]
 
-        full_text = "".join(buffer_parts)
+        # --- Anti-hallucination gates cho streaming path: nếu trip → ghi đè
+        # answer bằng refusal template + emit done event với answer mới.
+        # Lưu ý: text đã streaming ra client; FE sẽ thay thế khi nhận "done"
+        # (hiện chat.html dùng evt.answer trong done làm finalAnswer chính).
+        forced_refusal = False
+        if hits and _is_hallucinated_uncited(full_text, citations):
+            logger.warning(
+                "Citations gate TRIPPED (stream): len=%d citations=0 hits=%d top_score=%.4f",
+                len(full_text), len(hits), top_score,
+            )
+            full_text = _REFUSAL_TEMPLATE
+            citations = []
+            forced_refusal = True
+
+        # Phase 3.3 faithfulness check (cùng logic answer())
+        if (
+            citations
+            and not forced_refusal
+            and not _looks_like_refusal(full_text)
+        ):
+            premise = _build_premise_from_citations(hits, citations)
+            grounded, reason = check_faithfulness(
+                self.claude, premise, full_text, judge_model=CLAUDE_HAIKU_MODEL,
+            )
+            if not grounded:
+                logger.warning(
+                    "Faithfulness gate TRIPPED (stream): %s | len=%d",
+                    reason, len(full_text),
+                )
+                full_text = _REFUSAL_TEMPLATE
+                citations = []
+                forced_refusal = True
+
         _, suggested_questions = _extract_suggestions(full_text)
 
-        # Lọc nguồn: Chỉ lấy các nguồn có điểm cao và giới hạn số lượng hiển thị
-        filtered_sources = [s for s in source_mapping if s["score"] >= _MIN_SOURCE_SCORE_TO_SHOW]
-        filtered_sources = filtered_sources[:_MAX_SOURCES_TO_SHOW]
+        # Trust Citations API: bỏ filter score, Claude đã verify chunk hữu ích.
+        if citations:
+            cited_sources = _build_sources_from_citations(hits, citations)
+        else:
+            cited_sources = []
+        filtered_sources = cited_sources[:_MAX_SOURCES_TO_SHOW]
 
         yield {
             "type": "done",
             "answer": full_text,
             "sources": filtered_sources,
             "suggested_questions": suggested_questions,
+            "citations_count": len(citations),
+            "forced_refusal": forced_refusal,
         }

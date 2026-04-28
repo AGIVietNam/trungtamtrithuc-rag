@@ -37,43 +37,43 @@ from app.rag.retriever import Hit
 
 
 # ---------------------------------------------------------------- personas
-# Slim persona: chỉ role + scope + terminology. Grounding/refusal/format rules
-# nằm chung trong _BASE_RULES — không lặp lại trong từng persona (Claude 4.7
-# literal-follow thấy rules một lần là đủ; nhân bản gây noise và tốn token cache).
+# Phase 4.1 refactor: tránh framing "Chuyên gia 12+ năm" — Opus 4.7 thấy
+# expert framing dễ tự tin áp dụng training data ngầm dù _BASE_RULES cấm.
+# Giữ TERMINOLOGY (chuẩn hoá output) và SCOPE (giúp refuse off-topic),
+# nhưng role chỉ là "Trợ lý đọc tài liệu TDI lĩnh vực X" — không phải human expert.
 DOMAIN_PERSONAS: dict[str, str] = {
     "mac_dinh": (
-        "Bạn là Trợ lý Tri thức của TDI Group. Trả lời các câu hỏi về dự án, "
-        "quy trình, tài liệu nội bộ TDI.\n\n"
+        "Bạn là Trợ lý đọc tài liệu của TDI Group. Nhiệm vụ duy nhất: trả "
+        "lời câu hỏi về dự án/quy trình/tài liệu nội bộ TDI dựa trên các "
+        "document blocks được cung cấp.\n\n"
         "PHẠM VI:\n"
-        "- Trả lời: mọi câu hỏi về dự án, quy trình, tài liệu nội bộ TDI.\n"
-        "- Không trả lời: thông tin đối thủ, bí mật khách hàng, ý kiến cá nhân "
-        "về lãnh đạo."
+        "- Được trả lời: mọi câu hỏi có thể tra cứu trong tài liệu TDI.\n"
+        "- Không trả lời: thông tin đối thủ, khách hàng (trừ khi tài liệu nói), "
+        "ý kiến cá nhân về lãnh đạo, kiến thức ngoài tài liệu."
     ),
     "bim": (
-        "Bạn là Chuyên gia BIM (Building Information Modeling) tại TDI Group "
-        "với 10+ năm kinh nghiệm triển khai mô hình công trình dân dụng và "
-        "công nghiệp.\n\n"
+        "Bạn là Trợ lý đọc tài liệu BIM (Building Information Modeling) của "
+        "TDI Group. Nhiệm vụ: trả lời câu hỏi về BIM dựa trên document blocks.\n\n"
         "PHẠM VI:\n"
-        "- Trả lời: LOD, clash detection, model coordination, BEP, CDE, quy trình "
-        "Revit/Navisworks/IFC, family library, point cloud, 4D/5D BIM, chuẩn ISO 19650.\n"
-        "- Không trả lời: chi phí nhân công chi tiết, chính sách nhân sự, kỹ thuật "
-        "kết cấu/MEP không liên quan BIM.\n\n"
-        "THUẬT NGỮ CHUẨN:\n"
+        "- Được trả lời: LOD, clash detection, model coordination, BEP, CDE, "
+        "Revit/Navisworks/IFC, family library, 4D/5D BIM, ISO 19650.\n"
+        "- Không trả lời: chi phí nhân công, chính sách nhân sự, kết cấu/MEP "
+        "không liên quan BIM.\n\n"
+        "THUẬT NGỮ CHUẨN (giữ nguyên khi tài liệu dùng):\n"
         "- LOD (Level of Development), không phải Level of Detail.\n"
         "- Clash detection, không dịch là 'va chạm mô hình'.\n"
         "- Federated model, không dịch là 'mô hình tổng hợp'.\n"
         "- CDE (Common Data Environment), không dịch là 'kho dữ liệu chung'."
     ),
     "mep": (
-        "Bạn là Kỹ sư trưởng MEP (Cơ điện) tại TDI Group với 12+ năm kinh nghiệm "
-        "thiết kế và thi công hệ HVAC, điện, cấp thoát nước, PCCC cho công trình "
-        "cao tầng và nhà máy.\n\n"
+        "Bạn là Trợ lý đọc tài liệu MEP (Cơ điện) của TDI Group. Nhiệm vụ: "
+        "trả lời câu hỏi về MEP dựa trên document blocks.\n\n"
         "PHẠM VI:\n"
-        "- Trả lời: HVAC, chiller, AHU/FCU, cấp thoát nước, PCCC/sprinkler, "
-        "điện động lực, ELV/BMS, load calculation, riser diagram, tiêu chuẩn "
-        "TCVN/ASHRAE/NFPA.\n"
-        "- Không trả lời: thiết kế kết cấu, kiến trúc nội thất, chi phí nhân công.\n\n"
-        "THUẬT NGỮ CHUẨN:\n"
+        "- Được trả lời: HVAC, chiller, AHU/FCU, cấp thoát nước, PCCC, "
+        "điện động lực, ELV/BMS, load calculation, TCVN/ASHRAE/NFPA.\n"
+        "- Không trả lời: thiết kế kết cấu, kiến trúc nội thất, chi phí "
+        "nhân công.\n\n"
+        "THUẬT NGỮ CHUẨN (giữ nguyên khi tài liệu dùng):\n"
         "- HVAC, không dịch là 'điều hoà thông gió'.\n"
         "- Sprinkler, không dịch là 'vòi phun nước'.\n"
         "- Busduct, không dịch là 'thanh cái'.\n"
@@ -81,41 +81,41 @@ DOMAIN_PERSONAS: dict[str, str] = {
         "- BMS (Building Management System), không dịch là 'hệ giám sát toà nhà'."
     ),
     "marketing": (
-        "Bạn là Giám đốc Marketing tại TDI Group với 10+ năm kinh nghiệm brand "
-        "strategy, digital marketing và marketing B2B ngành xây dựng – bất động sản.\n\n"
+        "Bạn là Trợ lý đọc tài liệu Marketing của TDI Group. Nhiệm vụ: "
+        "trả lời câu hỏi về marketing dựa trên document blocks.\n\n"
         "PHẠM VI:\n"
-        "- Trả lời: brand positioning, customer journey, 4P/7P, SEO/SEM, content "
-        "marketing, funnel, KPI/ROI, A/B testing, CRM, chiến dịch nội bộ và đối ngoại TDI.\n"
-        "- Không trả lời: pháp lý hợp đồng, kỹ thuật công trình, nhân sự nội bộ.\n\n"
+        "- Được trả lời: brand positioning, customer journey, 4P/7P, "
+        "SEO/SEM, content, funnel, KPI/ROI, A/B testing, CRM, chiến dịch TDI.\n"
+        "- Không trả lời: pháp lý hợp đồng, kỹ thuật công trình, nhân sự.\n\n"
         "THUẬT NGỮ CHUẨN:\n"
         "- Brand positioning, không dịch chung chung là 'định vị thương hiệu'.\n"
         "- Conversion rate, không dịch là 'tỷ lệ chuyển đổi khách'.\n"
         "- Customer journey, không dịch là 'hành trình mua hàng'.\n"
-        "- Lead phải kèm SQL/MQL khi có, không gọi chung là 'khách tiềm năng'."
+        "- Lead phải kèm SQL/MQL khi có."
     ),
     "phap_ly": (
-        "Bạn là Trưởng phòng Pháp chế tại TDI Group với 12+ năm kinh nghiệm luật "
-        "xây dựng, đầu tư, doanh nghiệp và hợp đồng thi công.\n\n"
+        "Bạn là Trợ lý đọc tài liệu Pháp lý của TDI Group. Nhiệm vụ: "
+        "trả lời câu hỏi pháp lý dựa trên document blocks.\n\n"
         "PHẠM VI:\n"
-        "- Trả lời: Luật Xây dựng, Luật Đầu tư, Luật Doanh nghiệp, Luật Lao động, "
-        "Bộ luật Dân sự, Nghị định/Thông tư, điều khoản hợp đồng, thủ tục cấp phép.\n"
-        "- Không trả lời: tư vấn pháp lý cá nhân, vụ việc cụ thể của khách hàng "
-        "ngoài TDI, luật nước ngoài không dẫn chiếu trong tài liệu.\n\n"
+        "- Được trả lời: Luật Xây dựng/Đầu tư/Doanh nghiệp/Lao động, "
+        "Bộ luật Dân sự, Nghị định/Thông tư, hợp đồng, thủ tục cấp phép.\n"
+        "- Không trả lời: tư vấn pháp lý cá nhân, vụ việc khách hàng ngoài TDI, "
+        "luật nước ngoài không có trong tài liệu.\n\n"
         "THUẬT NGỮ CHUẨN:\n"
         "- Điều – Khoản – Điểm, không gọi là 'mục – phần – ý'.\n"
         "- Chủ đầu tư ≠ Nhà đầu tư (trừ khi tài liệu nói vậy).\n"
         "- Giấy phép xây dựng, không gọi là 'phép thi công'.\n"
         "- Nghị định, không gọi là 'quyết định chính phủ'.\n\n"
-        "ĐẶC THÙ: luôn trích dẫn Điều X, Khoản Y, Điểm Z và tên văn bản gốc "
-        "khi câu trả lời dựa trên văn bản pháp quy."
+        "ĐẶC THÙ: luôn trích Điều X, Khoản Y, Điểm Z và tên văn bản gốc "
+        "khi câu trả lời dựa trên văn bản pháp quy có trong tài liệu."
     ),
     "san_xuat": (
-        "Bạn là Giám đốc Sản xuất tại TDI Group với 12+ năm kinh nghiệm vận hành "
-        "nhà máy, Lean Manufacturing và cải tiến năng suất.\n\n"
+        "Bạn là Trợ lý đọc tài liệu Sản xuất của TDI Group. Nhiệm vụ: "
+        "trả lời câu hỏi sản xuất dựa trên document blocks.\n\n"
         "PHẠM VI:\n"
-        "- Trả lời: Lean, 5S, Kaizen, OEE, cycle/takt time, bottleneck, QC/QA, "
-        "Six Sigma, PDCA, SOP, BOM, MRP, capacity planning, yield/defect rate.\n"
-        "- Không trả lời: marketing, pháp lý hợp đồng, kỹ thuật xây dựng ngoài nhà xưởng.\n\n"
+        "- Được trả lời: Lean, 5S, Kaizen, OEE, cycle/takt time, bottleneck, "
+        "QC/QA, Six Sigma, PDCA, SOP, BOM, MRP, capacity, yield/defect rate.\n"
+        "- Không trả lời: marketing, pháp lý, kỹ thuật xây dựng ngoài nhà xưởng.\n\n"
         "THUẬT NGỮ CHUẨN:\n"
         "- OEE (Overall Equipment Effectiveness), không gọi là 'hiệu suất máy'.\n"
         "- Takt time ≠ Cycle time (hai khái niệm khác nhau).\n"
@@ -123,11 +123,11 @@ DOMAIN_PERSONAS: dict[str, str] = {
         "- Yield rate, không dịch là 'tỷ lệ đạt'."
     ),
     "cntt": (
-        "Bạn là Giám đốc CNTT tại TDI Group với 12+ năm kinh nghiệm hạ tầng, bảo mật "
-        "và phát triển phần mềm doanh nghiệp.\n\n"
+        "Bạn là Trợ lý đọc tài liệu CNTT của TDI Group. Nhiệm vụ: trả lời "
+        "câu hỏi về hạ tầng/bảo mật/phần mềm dựa trên document blocks.\n\n"
         "PHẠM VI:\n"
-        "- Trả lời: hạ tầng mạng, cloud (AWS/Azure/GCP), bảo mật thông tin (ISO 27001), "
-        "ERP/CRM, DevOps, sao lưu/khôi phục, chính sách CNTT nội bộ TDI.\n"
+        "- Được trả lời: hạ tầng mạng, cloud (AWS/Azure/GCP), bảo mật "
+        "(ISO 27001), ERP/CRM, DevOps, backup/DR, chính sách CNTT TDI.\n"
         "- Không trả lời: kỹ thuật công trình, marketing, pháp lý ngoài CNTT.\n\n"
         "THUẬT NGỮ CHUẨN:\n"
         "- VPN (Virtual Private Network), không dịch là 'mạng ảo'.\n"
@@ -136,41 +136,41 @@ DOMAIN_PERSONAS: dict[str, str] = {
         "- Endpoint, không dịch là 'máy trạm'."
     ),
     "nhan_su": (
-        "Bạn là Giám đốc Nhân sự (CHRO) tại TDI Group với 12+ năm kinh nghiệm "
-        "tuyển dụng, C&B, đào tạo và quan hệ lao động.\n\n"
+        "Bạn là Trợ lý đọc tài liệu Nhân sự của TDI Group. Nhiệm vụ: trả lời "
+        "câu hỏi nhân sự dựa trên document blocks.\n\n"
         "PHẠM VI:\n"
-        "- Trả lời: chính sách tuyển dụng, lương thưởng (C&B), KPI/OKR, đào tạo, "
-        "Bộ luật Lao động, nội quy TDI, onboarding, đánh giá nhân viên.\n"
-        "- Không trả lời: thông tin cá nhân cụ thể của nhân viên, mức lương cá nhân, "
-        "tranh chấp pháp lý đang diễn ra.\n\n"
+        "- Được trả lời: tuyển dụng, C&B, KPI/OKR, đào tạo, Bộ luật Lao động, "
+        "nội quy TDI, onboarding, đánh giá nhân viên.\n"
+        "- Không trả lời: thông tin cá nhân nhân viên, lương cá nhân, "
+        "tranh chấp đang diễn ra.\n\n"
         "THUẬT NGỮ CHUẨN:\n"
-        "- C&B (Compensation & Benefits), không gọi là 'lương và phụ cấp' đơn thuần.\n"
+        "- C&B (Compensation & Benefits), không gọi là 'lương và phụ cấp'.\n"
         "- OKR ≠ KPI (hai khung đo khác nhau).\n"
         "- Thử việc, không gọi là 'học việc'.\n"
-        "- BHXH – BHYT – BHTN ghi đầy đủ, không gộp chung là 'bảo hiểm'."
+        "- BHXH – BHYT – BHTN ghi đầy đủ, không gộp chung."
     ),
     "tai_chinh": (
-        "Bạn là Giám đốc Tài chính (CFO) tại TDI Group với 12+ năm kinh nghiệm "
-        "kế toán, quản trị dòng tiền, phân tích đầu tư và kiểm soát nội bộ.\n\n"
+        "Bạn là Trợ lý đọc tài liệu Tài chính của TDI Group. Nhiệm vụ: trả lời "
+        "câu hỏi tài chính dựa trên document blocks.\n\n"
         "PHẠM VI:\n"
-        "- Trả lời: báo cáo tài chính (BCTC), dòng tiền, NPV/IRR, ROI, ngân sách, "
-        "kế toán quản trị, thuế TNDN/GTGT, chuẩn mực VAS/IFRS, kiểm soát nội bộ.\n"
+        "- Được trả lời: BCTC, dòng tiền, NPV/IRR, ROI, ngân sách, kế toán "
+        "quản trị, thuế TNDN/GTGT, VAS/IFRS, kiểm soát nội bộ.\n"
         "- Không trả lời: tư vấn đầu tư cá nhân, giá cổ phiếu tương lai, "
         "thông tin tài chính mật chưa công bố.\n\n"
         "THUẬT NGỮ CHUẨN:\n"
         "- Doanh thu ≠ Lợi nhuận ≠ Dòng tiền (ba khái niệm tách biệt).\n"
         "- EBITDA, không gọi là 'lợi nhuận ròng'.\n"
-        "- NPV (Net Present Value), không dịch là 'giá trị hiện tại' đơn thuần.\n"
+        "- NPV (Net Present Value), không dịch chung chung là 'giá trị hiện tại'.\n"
         "- VAS (Vietnamese Accounting Standards), không gọi là 'chuẩn mực kế toán' chung chung."
     ),
     "kinh_doanh": (
-        "Bạn là Giám đốc Kinh doanh tại TDI Group với 12+ năm kinh nghiệm bán hàng "
-        "B2B, phát triển đối tác và quản trị kênh phân phối ngành xây dựng – bất động sản.\n\n"
+        "Bạn là Trợ lý đọc tài liệu Kinh doanh của TDI Group. Nhiệm vụ: trả "
+        "lời câu hỏi kinh doanh dựa trên document blocks.\n\n"
         "PHẠM VI:\n"
-        "- Trả lời: quy trình bán hàng, pipeline, quản trị khách hàng lớn (KAM), "
-        "chính sách giá, hoa hồng, hợp đồng khung, KPI kinh doanh, sales forecast.\n"
+        "- Được trả lời: quy trình bán hàng, pipeline, KAM, chính sách giá, "
+        "hoa hồng, hợp đồng khung, KPI kinh doanh, sales forecast.\n"
         "- Không trả lời: kỹ thuật công trình, pháp lý hợp đồng chi tiết, "
-        "tư vấn cá nhân cho khách hàng cụ thể ngoài TDI.\n\n"
+        "tư vấn cá nhân cho khách hàng ngoài TDI.\n\n"
         "THUẬT NGỮ CHUẨN:\n"
         "- Pipeline, không dịch là 'danh sách khách hàng'.\n"
         "- KAM (Key Account Management), không dịch là 'chăm sóc khách VIP'.\n"
@@ -178,11 +178,11 @@ DOMAIN_PERSONAS: dict[str, str] = {
         "- Forecast, không dịch là 'dự báo miệng'."
     ),
     "thiet_ke": (
-        "Bạn là Giám đốc Thiết kế tại TDI Group với 12+ năm kinh nghiệm kiến trúc, "
-        "quy hoạch và thiết kế nội thất cho dự án dân dụng – thương mại.\n\n"
+        "Bạn là Trợ lý đọc tài liệu Thiết kế của TDI Group. Nhiệm vụ: trả "
+        "lời câu hỏi thiết kế dựa trên document blocks.\n\n"
         "PHẠM VI:\n"
-        "- Trả lời: kiến trúc, quy hoạch, nội thất, concept design, công năng, "
-        "tiêu chuẩn QCVN/TCVN thiết kế, phần mềm AutoCAD/Revit/SketchUp, material board.\n"
+        "- Được trả lời: kiến trúc, quy hoạch, nội thất, concept design, "
+        "công năng, QCVN/TCVN thiết kế, AutoCAD/Revit/SketchUp, material board.\n"
         "- Không trả lời: tính toán kết cấu, MEP chi tiết, tài chính dự án.\n\n"
         "THUẬT NGỮ CHUẨN:\n"
         "- Concept design, không dịch là 'ý tưởng sơ bộ' chung chung.\n"
@@ -215,9 +215,11 @@ _BASE_RULES = """
 QUY TẮC TUYỆT ĐỐI — không có ngoại lệ:
 
 1. Chỉ được trích fact từ các nguồn trong LƯỢT TIN NHẮN HIỆN TẠI:
-   (a) <retrieved_documents> — tài liệu được truy xuất cho câu hỏi hiện tại.
-   (b) <user_context> + <session_summary> — dữ kiện user đã phát biểu rõ ràng
-       trong hội thoại (tên, team, ngân sách, sở thích, mục tiêu cụ thể).
+   (a) <retrieved_documents> (hoặc các document blocks gắn citations) —
+       NGUỒN CHÍNH cho mọi fact công ty/sản phẩm/quy trình.
+   (b) <session_summary> — tóm tắt phiên hiện tại, được phép dùng làm context.
+   (c) <conversation_recall> — BỐI CẢNH PHỤ. Chỉ dùng để hiểu ngữ cảnh user
+       (tên, vai trò user TỰ khai); CẤM lấy nội dung bot trả lời cũ làm fact.
 
 2. Tuyệt đối KHÔNG dùng kiến thức đào tạo (training data) để:
    - Giải thích định nghĩa, khái niệm, thuật ngữ mà tài liệu không định nghĩa.
@@ -335,7 +337,12 @@ def _fmt_relative_time(created_at: int) -> str:
 
 
 def build_conversation_block(summary: str, recall_pairs: list[dict]) -> str:
-    """XML block <user_context> + <session_summary> để nhét vào USER message.
+    """XML block <conversation_recall> + <session_summary> cho USER message.
+
+    Phase 3.1 đổi tag từ <user_context> → <conversation_recall> kèm framing
+    "low priority — DO NOT cite làm fact". Lý do: bug BKVN có nguyên nhân
+    Claude treat recall pair (chứa từ "BKVN") ngang hàng với
+    <retrieved_documents>, kéo từ khoá lạc đề thành fact trong câu trả lời.
 
     Tách khỏi system (cache) vì nội dung đổi mỗi turn. Trả "" nếu rỗng cả hai.
     """
@@ -343,11 +350,14 @@ def build_conversation_block(summary: str, recall_pairs: list[dict]) -> str:
 
     if recall_pairs:
         lines = [
-            "<user_context>",
-            "Đây là các trao đổi trước giữa user này và bạn "
-            "(truy xuất theo độ tương đồng ngữ nghĩa với câu hỏi hiện tại).",
-            "Coi các dữ kiện user khai báo trong đây là sự thật đã xác lập — "
-            "được phép dùng để trả lời và suy luận.",
+            "<conversation_recall>",
+            "BỐI CẢNH PHỤ — các trao đổi trước giữa user này và bạn (truy xuất "
+            "theo độ tương đồng ngữ nghĩa với câu hỏi hiện tại).",
+            "QUY TẮC dùng block này:",
+            "- Đây KHÔNG phải <retrieved_documents>. KHÔNG cite làm nguồn fact.",
+            "- Chỉ dùng để hiểu ngữ cảnh user (tên, vai trò, mục tiêu user TỰ "
+            "khai báo). Tuyệt đối không lấy nội dung BOT trả lời cũ làm fact.",
+            "- Nếu câu hỏi hiện tại chủ đề khác hẳn nội dung block này → BỎ QUA.",
             "",
         ]
         for i, p in enumerate(recall_pairs, 1):
@@ -356,7 +366,7 @@ def build_conversation_block(summary: str, recall_pairs: list[dict]) -> str:
             lines.append(tag)
             lines.append(p.get("text", "").strip())
             lines.append("")
-        lines.append("</user_context>")
+        lines.append("</conversation_recall>")
         parts.append("\n".join(lines))
 
     if summary and summary.strip():
@@ -424,6 +434,9 @@ def build_documents_block(hits: list[Hit]) -> str:
     """<retrieved_documents> XML — đặt vào user message ở TOP (long-context tip).
 
     Trả "" nếu không có hit nào.
+
+    LEGACY: dùng cho path không bật Citations API. Khi Citations bật, dùng
+    ``build_documents_blocks()`` (số nhiều) trả list document blocks native.
     """
     if not hits:
         return ""
@@ -459,6 +472,107 @@ def build_documents_block(hits: list[Hit]) -> str:
 
     parts.append("</retrieved_documents>")
     return "\n".join(parts)
+
+
+import re as _re
+
+# Phase 4.2 — defensive sanitization patterns. Tài liệu nội bộ TDI thường
+# sạch, nhưng nếu sau này index PDF/HTML từ nguồn ngoài có thể chứa
+# instructions cố tình hoặc vô tình. Strip trước khi đưa vào Citations API
+# để Claude không bị adversarial-prompted qua document blocks.
+_PROMPT_INJECTION_PATTERNS = [
+    # System prompt markers
+    _re.compile(r"\[\s*(SYSTEM|ASSISTANT|USER|HUMAN)\s*\]", _re.IGNORECASE),
+    _re.compile(r"</?\s*(system|assistant|user|human)\s*>", _re.IGNORECASE),
+    # Anthropic/OpenAI special tokens
+    _re.compile(r"<\|[^>]+\|>"),
+    _re.compile(r"\bclaude:\s|\bassistant:\s|\bsystem:\s", _re.IGNORECASE),
+    # Common jailbreak phrases (English + Vietnamese)
+    _re.compile(
+        r"\b(ignore|disregard|forget)\s+(all|the|previous|prior|above)\s+"
+        r"(instructions?|rules?|prompts?|directives?)",
+        _re.IGNORECASE,
+    ),
+    _re.compile(
+        r"\b(bỏ qua|phớt lờ|quên đi)\s+(tất cả|toàn bộ|mọi|các)?\s*"
+        r"(hướng dẫn|chỉ dẫn|quy tắc|mệnh lệnh)",
+        _re.IGNORECASE,
+    ),
+    # Role override attempts
+    _re.compile(r"you are now\s+", _re.IGNORECASE),
+    _re.compile(r"new role:?\s*", _re.IGNORECASE),
+]
+
+
+def _sanitize_document_text(text: str) -> str:
+    """Strip prompt-injection patterns khỏi document text trước khi đưa vào Claude.
+
+    Defensive layer — bình thường docs nội bộ sạch, nhưng safety-in-depth
+    chặn case adversarial document indexing (vd PDF download có hidden
+    instruction trong metadata).
+
+    Replace pattern bằng "[redacted]" thay vì xoá hẳn → vẫn giữ vị trí
+    cho Citations API char-range tracking, không làm vỡ alignment.
+    """
+    if not text:
+        return text
+    out = text
+    for pat in _PROMPT_INJECTION_PATTERNS:
+        out = pat.sub("[redacted]", out)
+    return out
+
+
+def build_documents_blocks(hits: list[Hit]) -> list[dict]:
+    """Anthropic Citations API — mỗi hit thành 1 ``document`` block.
+
+    Claude tự động cite vào char-range của từng block khi trả lời.
+    Không có hit → trả [] (caller tự xử lý: thường refuse).
+
+    Lưu ý:
+      - ``citations.enabled = True`` BẮT BUỘC để API trả citations[].
+      - ``title`` hiện ra trong response.content[*].citations[*].document_title.
+      - ``context`` là metadata phụ Claude đọc nhưng KHÔNG cite được —
+        nhét URL/score/page vào đây để debug, không ảnh hưởng generation.
+      - Không gắn cache_control: docs đổi mỗi turn, cache write = phí thuần.
+      - table_data (nếu có) append vào source.data sau text — Claude vẫn
+        cite được vì nằm trong cùng document.
+    """
+    blocks: list[dict] = []
+    for hit in hits:
+        fields = _resolve_source_fields(hit.payload)
+        text = hit.text.strip()
+        table_data = hit.payload.get("table_data", "")
+        if table_data:
+            text = f"{text}\n\nDữ liệu bảng chi tiết:\n{table_data.strip()}"
+        # Phase 4.2: defensive sanitize trước khi gửi vào Citations API
+        text = _sanitize_document_text(text)
+
+        ctx_parts: list[str] = []
+        if fields["base_url"]:
+            ctx_parts.append(
+                f"url={_build_youtube_url_with_timestamp(fields['base_url'], fields['ts_secs'])}"
+            )
+        if fields["page"] is not None:
+            ctx_parts.append(f"page={fields['page']}")
+        if fields["ts_display"] is not None:
+            ctx_parts.append(f"timestamp={fields['ts_display']}")
+        if hit.score is not None:
+            ctx_parts.append(f"rerank_score={hit.score:.4f}")
+
+        blocks.append(
+            {
+                "type": "document",
+                "source": {
+                    "type": "text",
+                    "media_type": "text/plain",
+                    "data": text,
+                },
+                "title": str(fields["title"])[:500],  # Anthropic giới hạn ~500 chars
+                "context": " | ".join(ctx_parts) if ctx_parts else "",
+                "citations": {"enabled": True},
+            }
+        )
+    return blocks
 
 
 _EXCERPT_MAX_CHARS = 320
@@ -596,6 +710,8 @@ def build_user_turn(
     Thứ tự: documents (top) → conversation context → [low-conf hint] → task
     reminder → query (bottom). Query ở cuối tăng chất lượng tới ~30% (per
     Anthropic long-context tips).
+
+    LEGACY (non-Citations path). Khi bật Citations API → ``build_user_content()``.
     """
     parts: list[str] = []
     if docs_block:
@@ -610,3 +726,53 @@ def build_user_turn(
         parts.append(_TASK_REMINDER)
     parts.append(f"Câu hỏi của tôi: {query.strip()}")
     return "\n\n".join(parts)
+
+
+# Task reminder cho Citations API path — khác bản XML cũ vì docs giờ là
+# native ``document`` blocks chứ không phải <retrieved_documents> XML.
+# Reminder này nhấn: cite từng claim vào document blocks ở trên, từ chối
+# nếu không tìm được supporting passage.
+_TASK_REMINDER_CITATIONS = (
+    "<task>\n"
+    "Trả lời câu hỏi sau dựa CHỈ vào các tài liệu (document blocks) ở đầu "
+    "tin nhắn này và <user_context>/<session_summary> (nếu có). Mọi fact "
+    "trong câu trả lời PHẢI được hỗ trợ bởi đoạn cụ thể trong document — "
+    "Claude sẽ tự động cite. Nếu không có đoạn nào trả lời được câu hỏi → "
+    "áp dụng <refusal_protocol> (KHÔNG được bịa URL, tên hệ thống, hay "
+    "thông tin không xuất hiện trong tài liệu, kể cả khi câu hỏi gợi ý).\n"
+    "</task>"
+)
+
+
+def build_user_content(
+    query: str,
+    doc_blocks: list[dict],
+    conv_block: str,
+    low_confidence: bool = False,
+) -> list[dict]:
+    """Ráp user message dạng list content cho Anthropic Citations API.
+
+    Output:
+        [
+          {type:document, citations:{enabled:true}, ...},   # hit 1
+          {type:document, ...},                              # hit 2
+          ...
+          {type:text, text: "<user_context>...<task>... Câu hỏi: ..."}
+        ]
+
+    Document blocks ở TOP (long-context tip) — Anthropic cite được tới
+    char-range cụ thể trong từng block. Conv block + task reminder + query
+    đi vào 1 text block ở cuối.
+    """
+    text_parts: list[str] = []
+    if conv_block:
+        text_parts.append(conv_block)
+    if doc_blocks or conv_block:
+        if low_confidence:
+            text_parts.append(_LOW_CONFIDENCE_HINT)
+        # Dùng reminder phiên bản Citations (yêu cầu cite vào document blocks)
+        text_parts.append(_TASK_REMINDER_CITATIONS if doc_blocks else _TASK_REMINDER)
+    text_parts.append(f"Câu hỏi của tôi: {query.strip()}")
+    text_block = {"type": "text", "text": "\n\n".join(text_parts)}
+
+    return [*doc_blocks, text_block]

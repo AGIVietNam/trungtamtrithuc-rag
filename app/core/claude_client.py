@@ -9,6 +9,51 @@ import anthropic
 logger = logging.getLogger(__name__)
 
 
+def _extract_text_and_citations(message: Any) -> tuple[str, list[dict]]:
+    """Đọc final message của Anthropic Citations API → (text, citations list).
+
+    Mỗi text block có thể kèm ``citations`` (list of CitationCharLocation /
+    CitationContentBlockLocation). Ta gom flat lại để chain.py post-process.
+
+    Citation fields chuẩn hóa (tên field SDK có thể đổi giữa version):
+      - doc_index : int — vị trí trong messages[*].content (đếm cả non-doc)
+      - doc_title : str
+      - cited_text: str — đoạn nguyên văn Claude trích
+      - start, end: vị trí char (text source) hoặc block (custom content)
+      - text_in_answer: phần text Claude viết được hỗ trợ bởi citation này
+    """
+    text_parts: list[str] = []
+    citations: list[dict] = []
+    content = getattr(message, "content", None) or []
+    for block in content:
+        btype = getattr(block, "type", None)
+        if btype != "text":
+            continue
+        block_text = getattr(block, "text", "") or ""
+        text_parts.append(block_text)
+        block_citations = getattr(block, "citations", None) or []
+        for c in block_citations:
+            citations.append(
+                {
+                    "text_in_answer": block_text,
+                    "doc_index": getattr(c, "document_index", None),
+                    "doc_title": getattr(c, "document_title", None),
+                    "cited_text": getattr(c, "cited_text", "") or "",
+                    "start": (
+                        getattr(c, "start_char_index", None)
+                        if getattr(c, "start_char_index", None) is not None
+                        else getattr(c, "start_block_index", None)
+                    ),
+                    "end": (
+                        getattr(c, "end_char_index", None)
+                        if getattr(c, "end_char_index", None) is not None
+                        else getattr(c, "end_block_index", None)
+                    ),
+                }
+            )
+    return "".join(text_parts), citations
+
+
 def _attach_history_cache(messages: list[dict]) -> list[dict]:
     """Đặt cache_control ephemeral trên block cuối của assistant gần nhất.
 
@@ -135,6 +180,68 @@ class ClaudeClient:
                 _log_usage(getattr(final, "usage", None), "stream")
             except Exception:
                 logger.debug("stream usage log failed", exc_info=True)
+
+    def generate_with_citations(
+        self,
+        system_prompt: str,
+        messages: list[dict],
+        max_tokens: int | None = None,
+        temperature: float = 0.3,
+        model: str | None = None,
+    ) -> dict:
+        """Như ``generate()`` nhưng trả {text, citations} cho path Citations API.
+
+        Caller phải đảm bảo trong ``messages`` có ``document`` blocks với
+        ``citations.enabled = True`` thì response mới có citations[].
+        """
+        cached_messages = _attach_history_cache(messages)
+        response = self.client.messages.create(
+            model=model or self.model,
+            max_tokens=max_tokens or self.max_tokens,
+            system=self._build_system(system_prompt),
+            messages=cached_messages,
+            temperature=temperature,
+        )
+        _log_usage(getattr(response, "usage", None), "sync+citations")
+        text, citations = _extract_text_and_citations(response)
+        return {"text": text, "citations": citations}
+
+    def generate_stream_with_citations(
+        self,
+        system_prompt: str,
+        messages: list[dict],
+        max_tokens: int | None = None,
+        temperature: float = 0.3,
+        model: str | None = None,
+    ) -> Iterator[dict]:
+        """Stream version của generate_with_citations.
+
+        Yields events:
+            {type:"delta", text:str}            — text chunk realtime
+            {type:"final", text:str, citations:list[dict]}
+                                                 — sau khi stream done
+
+        Lý do tách "final" event: citations chỉ có complete sau khi message
+        finalize. Streaming text trước cho UX, citations về sau cho post-processing.
+        """
+        cached_messages = _attach_history_cache(messages)
+        with self.client.messages.stream(
+            model=model or self.model,
+            max_tokens=max_tokens or self.max_tokens,
+            system=self._build_system(system_prompt),
+            messages=cached_messages,
+            temperature=temperature,
+        ) as stream:
+            for text in stream.text_stream:
+                yield {"type": "delta", "text": text}
+            try:
+                final = stream.get_final_message()
+                _log_usage(getattr(final, "usage", None), "stream+citations")
+                full_text, citations = _extract_text_and_citations(final)
+                yield {"type": "final", "text": full_text, "citations": citations}
+            except Exception:
+                logger.warning("stream final/citations parse failed", exc_info=True)
+                yield {"type": "final", "text": "", "citations": []}
 
     def quick_text(
         self,
