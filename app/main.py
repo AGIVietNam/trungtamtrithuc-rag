@@ -109,6 +109,12 @@ async def health() -> dict:
 
 
 try:
+    from app.config import UPLOAD_DIR
+    app.mount("/files", StaticFiles(directory=str(UPLOAD_DIR)), name="files")
+except Exception:
+    pass
+
+try:
     app.mount("/", StaticFiles(directory="web", html=True), name="static")
 except Exception:
     pass

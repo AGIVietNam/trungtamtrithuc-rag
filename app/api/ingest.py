@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -11,10 +13,23 @@ from app.schemas import IngestResponse
 from app.ingestion.doc_pipeline import ingest_document
 from app.ingestion.metadata_generator import generate_document_metadata
 from app.core.qdrant_store import DOMAINS, PERSONA_TO_DOMAIN
+from app.config import UPLOAD_DIR
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _safe_filename(name: str) -> str:
+    """Sanitize filename: strip path components, replace unsafe chars."""
+    name = Path(name).name
+    name = re.sub(r'[^\w.\-]', '_', name, flags=re.UNICODE)
+    name = re.sub(r'_+', '_', name).strip('._')
+    return name or "document"
+
+
+def _content_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:8]
 
 
 # Lifespan (main.py:_lifespan) gọi registry.ensure_all() tạo đủ 20 collection —
@@ -68,14 +83,16 @@ async def ingest_file(
             message=f"Định dạng '{suffix}' không được hỗ trợ. Chỉ chấp nhận: PDF, DOCX, TXT, MD, XLSX.",
         )
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        tmp.write(content)
-        tmp_path = tmp.name
-    t_upload = time.perf_counter()
+    content = await file.read()
+    file_hash = _content_hash(content)
+    original_name = title.strip() or file.filename
+    safe_name = f"{file_hash}_{_safe_filename(original_name)}"
+    if not safe_name.lower().endswith(suffix):
+        safe_name += suffix
+    persistent_path = UPLOAD_DIR / safe_name
 
     # Build metadata from form fields
-    meta = {}
+    meta: dict = {}
     if title.strip():
         meta["title"] = title.strip()
     if domain.strip():
@@ -86,12 +103,17 @@ async def ingest_file(
         meta["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
     if url.strip():
         meta["url"] = url.strip()
-
+    else:
+        # No external URL — serve file locally so page links work
+        meta["source_url"] = f"/files/{safe_name}"
 
     try:
+        persistent_path.write_bytes(content)
+        t_upload = time.perf_counter()
+
         result = ingest_document(
-            file_path=tmp_path,
-            original_name=title.strip() or file.filename,
+            file_path=str(persistent_path),
+            original_name=original_name,
             metadata=meta if meta else None,
         )
         t_ingest = time.perf_counter()
@@ -109,6 +131,7 @@ async def ingest_file(
             message=f"Nạp thành công '{file.filename}': {result.num_chunks} đoạn từ {result.num_pages} trang.",
         )
     except Exception as exc:
+        persistent_path.unlink(missing_ok=True)
         logger.exception("Ingest error for %s: %s", file.filename, exc)
         logger.info(
             "POST /api/ingest/file FAILED (%s): upload=%.3fs ingest=%.3fs total=%.3fs",
@@ -122,8 +145,6 @@ async def ingest_file(
             chunks_added=0,
             message=f"Lỗi khi nạp '{file.filename}': {exc}",
         )
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
