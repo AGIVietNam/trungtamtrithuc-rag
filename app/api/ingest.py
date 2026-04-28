@@ -76,11 +76,11 @@ async def ingest_file(
         return IngestResponse(status="error", chunks_added=0, message=domain_err)
 
     suffix = Path(file.filename).suffix.lower()
-    if suffix not in (".pdf", ".docx", ".doc", ".txt", ".md", ".xlsx"):
+    if suffix not in (".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md", ".xlsx"):
         return IngestResponse(
             status="error",
             chunks_added=0,
-            message=f"Định dạng '{suffix}' không được hỗ trợ. Chỉ chấp nhận: PDF, DOCX, TXT, MD, XLSX.",
+            message=f"Định dạng '{suffix}' không được hỗ trợ. Chỉ chấp nhận: PDF, DOCX, PPTX, TXT, MD, XLSX.",
         )
 
     content = await file.read()

@@ -188,35 +188,45 @@ def _docling_split_pages(doc) -> list[dict]:
     return result
 
 
-def _docling_parse(path: Path) -> list[dict]:
-    """Parse via Docling. Returns list[{"page": N, "text": md}], empty on failure/rejection."""
+def _parse_with_docling(path: Path) -> list[dict] | None:
+    """Generic Docling parser for any supported format (PDF, DOCX, PPTX, ...).
+
+    Returns per-page list[{"page": N, "text": md}] or None on failure/empty.
+    Callers apply their own additional quality checks if needed.
+    """
     converter = _get_docling_converter()
     if converter is None:
-        return []
+        return None
     try:
         result = converter.convert(source=str(path))
         doc = result.document
-
-        # Quality check on full document text
         full_md = _clean_markdown(_fix_joined_words(doc.export_to_markdown()))
-        is_good, reason = _check_docling_quality(full_md)
-        if not is_good:
-            logger.warning("Docling REJECTED for %s: %s", path.name, reason)
-            return []
-
-        # Multi-page: try per-page split via document structure
+        if not full_md or _count_meaningful_chars(full_md) < MIN_TEXT_CHARS:
+            return None
         num_pages = len(getattr(doc, "pages", {}))
         if num_pages > 1:
             pages = _docling_split_pages(doc)
             if pages:
-                logger.info("Docling OK for %s: %d pages", path.name, len(pages))
+                logger.info("Docling %s: %d pages", path.name, len(pages))
                 return pages
-
-        logger.info("Docling OK for %s: %d chars (single page)", path.name, len(full_md))
+        logger.info("Docling %s: 1 page, %d chars", path.name, len(full_md))
         return [{"page": 1, "text": full_md}]
     except Exception:
         logger.exception("Docling failed for %s", path.name)
+        return None
+
+
+def _docling_parse(path: Path) -> list[dict]:
+    """PDF-specific Docling parser with quality check. Returns [] on failure/rejection."""
+    pages = _parse_with_docling(path)
+    if not pages:
         return []
+    full_text = "\n\n".join(p["text"] for p in pages)
+    is_good, reason = _check_docling_quality(full_text)
+    if not is_good:
+        logger.warning("Docling REJECTED for %s: %s", path.name, reason)
+        return []
+    return pages
 
 
 # --- Tier 2: Claude Vision ---
@@ -379,18 +389,10 @@ def parse_xlsx(path: Path) -> str:
 
 # --- DOCX, TXT, MD ---
 
-def parse_docx(path: Path) -> str:
-    converter = _get_docling_converter()
-    if converter is not None:
-        try:
-            result = converter.convert(source=str(path))
-            md = result.document.export_to_markdown()
-            md = _clean_markdown(md)
-            md = _fix_joined_words(md)
-            if _count_meaningful_chars(md) >= MIN_TEXT_CHARS:
-                return md
-        except Exception:
-            logger.exception("Docling DOCX failed for %s", path.name)
+def parse_docx(path: Path) -> list[dict] | str:
+    pages = _parse_with_docling(path)
+    if pages:
+        return pages
     try:
         from docx import Document
         doc = Document(str(path))
@@ -408,6 +410,28 @@ def parse_docx(path: Path) -> str:
         return "\n\n".join(parts)
     except Exception:
         logger.exception("python-docx failed for %s", path.name)
+        return ""
+
+
+def parse_pptx(path: Path) -> list[dict] | str:
+    pages = _parse_with_docling(path)
+    if pages:
+        return pages
+    try:
+        from pptx import Presentation
+        prs = Presentation(str(path))
+        result: list[dict] = []
+        for i, slide in enumerate(prs.slides, 1):
+            texts = [
+                shape.text.strip()
+                for shape in slide.shapes
+                if hasattr(shape, "text") and shape.text.strip()
+            ]
+            if texts:
+                result.append({"page": i, "text": "\n".join(texts)})
+        return result or ""
+    except Exception:
+        logger.exception("python-pptx failed for %s", path.name)
         return ""
 
 
@@ -447,6 +471,9 @@ def parse(path: Union[str, Path]) -> dict:
     elif suffix in (".docx", ".doc"):
         content = parse_docx(path)
         mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    elif suffix in (".pptx", ".ppt"):
+        content = parse_pptx(path)
+        mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     elif suffix == ".xlsx":
         content = parse_xlsx(path)
         mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
