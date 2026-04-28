@@ -89,6 +89,50 @@ _MAX_UNCITED_SENTENCE_RATIO: float = 0.6
 # hoặc inject thủ công) — KHÔNG enforce citation requirement nữa.
 _REFUSAL_PREFIX = "Tài liệu TDI hiện chưa có thông tin"
 
+# Regex tìm URL trong answer (dùng cho URL fabrication check — kỹ thuật
+# deterministic detect hallucinate URL không cần gọi LLM judge).
+_URL_PATTERN = re.compile(
+    r"https?://[^\s<>\"')\]]+",
+    re.IGNORECASE,
+)
+
+
+def _extract_urls(text: str) -> list[str]:
+    """Lấy tất cả URL trong text. Strip ký tự cuối thường gặp (.,!?;:)."""
+    raw = _URL_PATTERN.findall(text or "")
+    out: list[str] = []
+    for u in raw:
+        u = u.rstrip(".,!?;:")
+        if u and u not in out:
+            out.append(u)
+    return out
+
+
+def _has_fabricated_url(answer: str, hits: list) -> tuple[bool, str]:
+    """Detect URL trong answer KHÔNG xuất hiện trong bất kỳ hit text/payload nào.
+
+    Đây là fast deterministic check (không gọi LLM) — catch case Claude bịa
+    URL kiểu `bkvn.tdigroup.vn` rất hiệu quả vì URL phải match exact substring.
+    """
+    answer_urls = _extract_urls(answer)
+    if not answer_urls:
+        return False, ""
+    # Build search corpus: tất cả text + payload URL fields của hits
+    corpus_parts: list[str] = []
+    for h in hits:
+        corpus_parts.append(h.text or "")
+        for k in ("url", "source_url", "youtube_url", "source"):
+            v = h.payload.get(k) if isinstance(h.payload, dict) else None
+            if isinstance(v, str):
+                corpus_parts.append(v)
+    corpus = "\n".join(corpus_parts)
+    for u in answer_urls:
+        # Strip protocol để match cả http/https variant
+        bare = re.sub(r"^https?://", "", u, flags=re.IGNORECASE).rstrip("/")
+        if bare and bare not in corpus:
+            return True, u
+    return False, ""
+
 
 def _should_refuse(hits: list) -> bool:
     """True khi retriever rỗng HOẶC top sigmoid < _HARD_REFUSE_SCORE.
@@ -370,38 +414,58 @@ class RAGChain:
         citations = result["citations"]
         t_claude = time.perf_counter()
 
-        # --- 4b. Faithfulness gate (Phase 3.3 nâng cấp — trọng tài thật):
-        # Skip nếu Claude tự refuse hoặc câu xã giao ngắn.
-        # Logic mới (sửa false-positive khi Claude paraphrase doc nhưng không
-        # emit native citations[]):
-        #   * citations non-empty → check on cited chunks (chính xác).
-        #   * citations rỗng + answer dài → check on FULL hits (paraphrase
-        #     có thể grounded dù Anthropic không attach citations[]).
-        # Fail-open: judge lỗi → KHÔNG refuse oan người dùng.
+        # --- 4b. Anti-hallucination gates (selective, low false-positive):
+        #
+        # Layer 1 — Fabricated URL check (deterministic, ~0ms):
+        #   Mọi URL trong answer phải xuất hiện trong text/payload của hits.
+        #   Catch case BKVN-style: Claude bịa `bkvn.tdigroup.vn`, dù có
+        #   citations[] hợp lệ trỏ tới chunk khác.
+        #
+        # Layer 2 — Faithfulness judge (Haiku, ~500ms):
+        #   CHỈ chạy khi citations==0 AND answer dài. Lý do: Citations API
+        #   guarantee char-range valid → khi citations present, trust nó.
+        #   Khi citations==0, Claude paraphrase nặng → cần judge xác nhận.
+        #
+        # Tránh always-judge vì gây false-positive refuse trên paraphrase
+        # legitimate (user complaint "in ra câu trả lời nhưng cuối cùng
+        # ra refusal").
         forced_refusal = False
         forced_reason = ""
-        if hits and not _looks_like_refusal(answer_text) and not _looks_like_smalltalk(answer_text):
-            if citations:
-                premise = _build_premise_from_citations(hits, citations)
-            else:
-                # Fallback premise: tất cả chunks đã retrieve. Phase 1 gate
-                # cũ ép citations==0 → refuse là quá khắt khe khi Claude
-                # paraphrase hợp lệ. Để Haiku judge quyết.
-                premise = "\n\n---\n\n".join(h.text.strip() for h in hits)
-                if len(premise) > 6000:
-                    premise = premise[:6000] + "…"
-            grounded, reason = check_faithfulness(
-                self.claude, premise, answer_text, judge_model=CLAUDE_HAIKU_MODEL,
-            )
-            if not grounded:
+
+        if (
+            hits
+            and not _looks_like_refusal(answer_text)
+            and not _looks_like_smalltalk(answer_text)
+        ):
+            # Layer 1: URL fabrication
+            fab, fab_url = _has_fabricated_url(answer_text, hits)
+            if fab:
                 logger.warning(
-                    "Faithfulness gate TRIPPED: %s | answer_len=%d citations=%d",
-                    reason, len(answer_text), len(citations),
+                    "URL fabrication detected: %s — not in any hit corpus",
+                    fab_url,
                 )
                 answer_text = _REFUSAL_TEMPLATE
                 citations = []
                 forced_refusal = True
-                forced_reason = f"faithfulness:{reason[:80]}"
+                forced_reason = f"fabricated_url:{fab_url[:80]}"
+
+            # Layer 2: faithfulness judge — chỉ khi không có citations
+            elif not citations:
+                premise = "\n\n---\n\n".join(h.text.strip() for h in hits)
+                if len(premise) > 6000:
+                    premise = premise[:6000] + "…"
+                grounded, reason = check_faithfulness(
+                    self.claude, premise, answer_text, judge_model=CLAUDE_HAIKU_MODEL,
+                )
+                if not grounded:
+                    logger.warning(
+                        "Faithfulness gate TRIPPED (no-citations path): %s | len=%d",
+                        reason, len(answer_text),
+                    )
+                    answer_text = _REFUSAL_TEMPLATE
+                    citations = []
+                    forced_refusal = True
+                    forced_reason = f"faithfulness:{reason[:80]}"
 
         clean_answer, suggested_questions = _extract_suggestions(answer_text)
 
@@ -557,31 +621,34 @@ class RAGChain:
                 full_text = evt["text"]
                 citations = evt["citations"]
 
-        # --- Anti-hallucination gate cho streaming path (cùng logic answer()):
-        # Faithfulness judge là trọng tài duy nhất. Citations rỗng KHÔNG còn
-        # tự động trip — Claude có thể paraphrase grounded mà không emit native
-        # citations[]. Để judge quyết.
+        # --- Anti-hallucination gates cho streaming path (cùng logic answer()):
+        # Layer 1: URL fabrication (deterministic).
+        # Layer 2: faithfulness judge CHỈ khi citations==0 + answer dài.
         # Note: text đã stream ra client; FE thay thế bằng evt.answer trong
-        # "done" event nếu refuse (hiện chat.html xử lý đúng).
+        # "done" event nếu refuse + show notice cho user (chat.html xử lý).
         forced_refusal = False
         if hits and not _looks_like_refusal(full_text) and not _looks_like_smalltalk(full_text):
-            if citations:
-                premise = _build_premise_from_citations(hits, citations)
-            else:
-                premise = "\n\n---\n\n".join(h.text.strip() for h in hits)
-                if len(premise) > 6000:
-                    premise = premise[:6000] + "…"
-            grounded, reason = check_faithfulness(
-                self.claude, premise, full_text, judge_model=CLAUDE_HAIKU_MODEL,
-            )
-            if not grounded:
-                logger.warning(
-                    "Faithfulness gate TRIPPED (stream): %s | len=%d citations=%d",
-                    reason, len(full_text), len(citations),
-                )
+            fab, fab_url = _has_fabricated_url(full_text, hits)
+            if fab:
+                logger.warning("URL fabrication (stream): %s", fab_url)
                 full_text = _REFUSAL_TEMPLATE
                 citations = []
                 forced_refusal = True
+            elif not citations:
+                premise = "\n\n---\n\n".join(h.text.strip() for h in hits)
+                if len(premise) > 6000:
+                    premise = premise[:6000] + "…"
+                grounded, reason = check_faithfulness(
+                    self.claude, premise, full_text, judge_model=CLAUDE_HAIKU_MODEL,
+                )
+                if not grounded:
+                    logger.warning(
+                        "Faithfulness gate TRIPPED (stream, no-citations): %s | len=%d",
+                        reason, len(full_text),
+                    )
+                    full_text = _REFUSAL_TEMPLATE
+                    citations = []
+                    forced_refusal = True
 
         _, suggested_questions = _extract_suggestions(full_text)
 

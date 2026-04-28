@@ -214,12 +214,17 @@ _BASE_RULES = """
 <grounding_rules>
 QUY TẮC TUYỆT ĐỐI — không có ngoại lệ:
 
-1. Chỉ được trích fact từ các nguồn trong LƯỢT TIN NHẮN HIỆN TẠI:
-   (a) <retrieved_documents> (hoặc các document blocks gắn citations) —
-       NGUỒN CHÍNH cho mọi fact công ty/sản phẩm/quy trình.
-   (b) <session_summary> — tóm tắt phiên hiện tại, được phép dùng làm context.
-   (c) <conversation_recall> — BỐI CẢNH PHỤ. Chỉ dùng để hiểu ngữ cảnh user
-       (tên, vai trò user TỰ khai); CẤM lấy nội dung bot trả lời cũ làm fact.
+1. Chỉ được trích fact từ <retrieved_documents> (hoặc document blocks gắn
+   citations). Đây là NGUỒN CHÍNH duy nhất cho mọi fact công ty/sản phẩm/
+   quy trình/URL/tên hệ thống.
+
+   <session_summary> và <conversation_recall> là BỐI CẢNH PHỤ:
+   - Chỉ dùng để hiểu ngữ cảnh hội thoại (tên user, mục tiêu họ TỰ khai báo).
+   - CẤM trích fact công ty/sản phẩm/URL/tên hệ thống từ đây — kể cả khi
+     summary có vẻ chứa thông tin liên quan, đó có thể là nội dung bot cũ
+     hallucinate hoặc keyword khớp tình cờ.
+   - Nếu câu hỏi hiện tại có CHỦ ĐỀ KHÁC nội dung summary/recall → BỎ QUA
+     toàn bộ summary/recall, chỉ dựa vào <retrieved_documents>.
 
 2. Tuyệt đối KHÔNG dùng kiến thức đào tạo (training data) để:
    - Giải thích định nghĩa, khái niệm, thuật ngữ mà tài liệu không định nghĩa.
@@ -372,8 +377,16 @@ def build_conversation_block(summary: str, recall_pairs: list[dict]) -> str:
     if summary and summary.strip():
         parts.append(
             "<session_summary>\n"
-            "Đây là tóm tắt các lượt hội thoại TRƯỚC trong phiên hiện tại "
-            "(đã rớt khỏi sliding window). Coi đây là thông tin đã xác lập.\n"
+            "BỐI CẢNH PHỤ — tóm tắt các lượt hội thoại TRƯỚC trong phiên này "
+            "(đã rớt khỏi sliding window).\n"
+            "QUY TẮC dùng block này:\n"
+            "- KHÔNG cite làm nguồn fact công ty/sản phẩm/URL.\n"
+            "- Chỉ dùng để hiểu ngữ cảnh user (mục tiêu user tự nêu, "
+            "tên/vai trò họ tự khai).\n"
+            "- Nếu câu hỏi hiện tại chủ đề khác hẳn nội dung này → BỎ QUA.\n"
+            "- Tuyệt đối KHÔNG suy luận hệ thống/sản phẩm/URL từ keyword "
+            "trong summary — keyword có thể đã được nhắc trong context khác.\n"
+            "\n"
             f"{summary.strip()}\n"
             "</session_summary>"
         )
