@@ -13,9 +13,9 @@ from app.core.conv_memory import ConversationMemory
 from app.core.conv_query_rewriter import rewrite as rewrite_query
 from app.rag.faithfulness import check_faithfulness
 from app.rag.intent_gate import (
-    canned_response,
     classify_intent,
     is_meta_intent,
+    respond_to_meta,
 )
 from app.rag.retriever import Retriever
 from app.rag.reranker import CrossEncoderReranker
@@ -358,6 +358,20 @@ class RAGChain:
         self.top_k = top_k
         self.rerank_top_k = rerank_top_k
 
+    @staticmethod
+    def _build_profile(user_name: str | None, user_role: str | None) -> dict:
+        """Convert auth context (user_name, user_role) → profile dict cho intent_gate.
+
+        Source of truth: backend auth (JWT/session). AI module KHÔNG persist —
+        mỗi turn nhận lại profile fresh từ request.
+        """
+        profile: dict = {}
+        if user_name and user_name.strip():
+            profile["name"] = user_name.strip()
+        if user_role and user_role.strip():
+            profile["role"] = user_role.strip()
+        return profile
+
     def answer(
         self,
         query: str,
@@ -365,6 +379,8 @@ class RAGChain:
         expert_domain: str | None = None,
         sources_filter: list[str] | None = None,
         user_id: str | None = None,
+        user_name: str | None = None,
+        user_role: str | None = None,
         session_id: str | None = None,
         summary: str = "",
         conv_memory: ConversationMemory | None = None,
@@ -388,11 +404,17 @@ class RAGChain:
         # Greeting/identity/capability không retrieval-able → trả canned response,
         # bypass cả retrieval lẫn Claude lẫn faithfulness gate. Tránh bug stream-rồi-
         # ghi-đè-bằng-refusal khi câu chào dài >100 chars + citations==0.
+        # Profile từ auth context (user_name/user_role) — backend là source of truth.
         intent = classify_intent(query)
         if is_meta_intent(intent):
-            logger.info("intent gate hit: %s → canned response (skip retrieval+Claude)", intent)
+            profile = self._build_profile(user_name, user_role)
+            text, _ = respond_to_meta(intent, query, profile)
+            logger.info(
+                "intent gate hit: %s → canned (user=%s name=%s len=%d)",
+                intent, user_id or "-", profile.get("name", "-"), len(text),
+            )
             return {
-                "answer": canned_response(intent, query),
+                "answer": text,
                 "sources": [],
                 "confidence": "high",
                 "suggested_questions": [],
@@ -586,6 +608,8 @@ class RAGChain:
         expert_domain: str | None = None,
         sources_filter: list[str] | None = None,
         user_id: str | None = None,
+        user_name: str | None = None,
+        user_role: str | None = None,
         session_id: str | None = None,
         summary: str = "",
         conv_memory: ConversationMemory | None = None,
@@ -606,8 +630,12 @@ class RAGChain:
         # Stream path: emit meta + delta + done với canned text, không gọi Claude.
         intent = classify_intent(query)
         if is_meta_intent(intent):
-            logger.info("intent gate hit (stream): %s → canned response", intent)
-            text = canned_response(intent, query)
+            profile = self._build_profile(user_name, user_role)
+            text, _ = respond_to_meta(intent, query, profile)
+            logger.info(
+                "intent gate hit (stream): %s → canned (user=%s name=%s len=%d)",
+                intent, user_id or "-", profile.get("name", "-"), len(text),
+            )
             yield {
                 "type": "meta",
                 "confidence": "high",

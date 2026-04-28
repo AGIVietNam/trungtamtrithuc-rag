@@ -17,6 +17,18 @@ class ChatRequest(BaseModel):
         default=None,
         description="Định danh user cho conversation memory. Nếu trống dùng session_id.",
     )
+    user_name: str | None = Field(
+        default=None,
+        description=(
+            "Tên hiển thị của user (vd 'Hoàng Quốc Tuấn'). Backend lấy từ JWT/"
+            "session auth và truyền vào — AI dùng để personalize meta response "
+            "(chào hỏi, trả lời 'Tôi là ai'). Nếu trống → AI fallback generic."
+        ),
+    )
+    user_role: str | None = Field(
+        default=None,
+        description="Vai trò user (vd 'V365-AI', 'admin', 'editor'). Optional.",
+    )
     history: list[ChatMessage] = Field(default_factory=list)
     domain: str = Field(default="general")
 

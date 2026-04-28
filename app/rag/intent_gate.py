@@ -195,6 +195,9 @@ def canned_response(intent: str, query: str = "") -> str:
 
     ``query`` chỉ dùng cho INTENT_INTRODUCE_USER để personalize ("Chào bạn Tuấn!").
     Các intent khác bỏ qua param này.
+
+    LEGACY: dùng cho path không có user profile (vd test). Caller nên gọi
+    ``respond_to_meta(intent, query, profile)`` để personalize bằng tên đã lưu.
     """
     if intent == INTENT_INTRODUCE_USER:
         name = _extract_introduced_name(query)
@@ -206,6 +209,69 @@ def canned_response(intent: str, query: str = "") -> str:
             )
         return _CANNED[INTENT_GREETING]
     return _CANNED.get(intent, "")
+
+
+def respond_to_meta(
+    intent: str,
+    query: str,
+    profile: dict | None = None,
+) -> tuple[str, dict]:
+    """Trả (response_text, profile_update) cho meta intent.
+
+    ``profile``: dict từ auth context (vd: {"name": "Hoàng Quốc Tuấn", "role": "V365-AI"}) —
+    backend supply qua ChatRequest.user_name/user_role, AI module KHÔNG persist.
+    Trả {} nếu user chưa đăng nhập.
+    ``profile_update``: legacy field, AI module hiện không apply (auth là source of truth).
+    Giữ trong return signature để tương thích testing/future use.
+
+    Logic:
+      * INTRODUCE_USER → extract name, response personalize, update {"name": name}.
+      * IDENTITY_USER + có profile.name → response với tên đã lưu.
+      * IDENTITY_USER + không có name → canned generic.
+      * GREETING / THANKS / GOODBYE + có profile.name → personalize tên.
+      * Còn lại → canned generic.
+
+    Đây là entry point chính. ``canned_response()`` chỉ giữ cho legacy.
+    """
+    profile = profile or {}
+    saved_name = (profile.get("name") or "").strip()
+
+    if intent == INTENT_INTRODUCE_USER:
+        new_name = _extract_introduced_name(query)
+        if new_name:
+            text = (
+                f"Chào bạn {new_name}! Rất vui được gặp. Tôi là Trợ lý đọc tài liệu "
+                f"của TDI Group, sẵn sàng giúp bạn tra cứu thông tin về dự án, "
+                f"quy trình và tài liệu nội bộ TDI. Bạn cần hỗ trợ gì hôm nay?"
+            )
+            return text, {"name": new_name}
+        return _CANNED[INTENT_GREETING], {}
+
+    if intent == INTENT_IDENTITY_USER:
+        if saved_name:
+            return (
+                f"Bạn là {saved_name} — theo thông tin bạn đã chia sẻ với tôi trước đó. "
+                f"Nếu thông tin này chưa đúng, hãy nói cho tôi biết tên đúng để tôi cập nhật nhé."
+            ), {}
+        return _CANNED[INTENT_IDENTITY_USER], {}
+
+    if intent == INTENT_GREETING and saved_name:
+        return (
+            f"Chào bạn {saved_name}! Tôi sẵn sàng giúp bạn tra cứu thông tin về "
+            f"dự án, quy trình và tài liệu nội bộ TDI. Bạn cần hỗ trợ gì hôm nay?"
+        ), {}
+
+    if intent == INTENT_THANKS and saved_name:
+        return (
+            f"Không có gì, bạn {saved_name}! Khi nào cần tra cứu thêm tài liệu, cứ hỏi tôi nhé."
+        ), {}
+
+    if intent == INTENT_GOODBYE and saved_name:
+        return (
+            f"Tạm biệt bạn {saved_name}! Khi nào cần tra cứu tài liệu TDI, cứ quay lại nhé."
+        ), {}
+
+    return _CANNED.get(intent, ""), {}
 
 
 def is_meta_intent(intent: str) -> bool:
