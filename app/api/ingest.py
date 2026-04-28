@@ -1176,6 +1176,7 @@ async def ingest_from_url(payload: FromUrlRequest = Body(...)) -> JobSubmitRespo
             "url": resolved.download_url,
             "is_playlist": is_playlist,
             "metadata": yt_meta,
+            "callback_url": payload.callback_url,
         })
         return JobSubmitResponse(job_id=job.job_id, filename=resolved.download_url)
 
@@ -1195,6 +1196,7 @@ async def ingest_from_url(payload: FromUrlRequest = Body(...)) -> JobSubmitRespo
         "headers": payload.headers or {},
         "filename": filename,
         "metadata": meta,
+        "callback_url": payload.callback_url,
     })
     return JobSubmitResponse(job_id=job.job_id, filename=filename)
 
@@ -1246,6 +1248,7 @@ async def ingest_from_urls(payload: FromUrlsRequest = Body(...)) -> BatchSubmitR
             "headers": item.headers or {},
             "filename": item.filename,
             "metadata": meta,
+            "callback_url": item.callback_url,
         })
         submitted.append({"job_id": job.job_id, "filename": item.filename})
 

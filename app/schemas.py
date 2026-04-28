@@ -110,12 +110,14 @@ class FromUrlsItem(BaseModel):
 
     `metadata.domain` BẮT BUỘC (1 trong 10 slug) để route Qdrant đúng collection.
     `headers` để truyền Bearer token cho SharePoint/Graph download URL.
+    `callback_url` để AI POST status khi job done/failed (xem JobCallbackPayload).
     """
     download_url: str
     filename: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     headers: dict[str, str] | None = None
     size_bytes: int | None = None
+    callback_url: str | None = None
 
 
 class FromUrlsRequest(BaseModel):
@@ -131,3 +133,21 @@ class FromUrlRequest(BaseModel):
     filename: str | None = None      # nếu trống, AI đoán từ URL/Content-Disposition
     metadata: dict[str, Any] = Field(default_factory=dict)
     headers: dict[str, str] | None = None
+    callback_url: str | None = None  # AI POST khi job done/failed
+
+
+class JobCallbackPayload(BaseModel):
+    """Payload AI POST sang `callback_url` khi job đạt trạng thái terminal.
+
+    BE/FE expose 1 endpoint nhận POST này → push notification cho user
+    (toast/email/Teams/DB), update document status, etc.
+    """
+    job_id: str
+    job_type: str               # "document" | "video_file" | "youtube"
+    filename: str
+    status: str                 # "done" | "failed"
+    chunks_added: int
+    pages: int
+    error: str | None
+    duration_sec: float
+    metadata: dict[str, Any] = Field(default_factory=dict)

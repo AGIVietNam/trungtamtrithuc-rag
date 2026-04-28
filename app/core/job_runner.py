@@ -99,6 +99,41 @@ class JobRunner:
         except Exception as exc:
             logger.exception("Job %s failed: %s", job_id, exc)
             await self._store.update(job_id, status="failed", error=str(exc))
+        finally:
+            # Notify webhook nếu submitter đăng ký callback_url. Best-effort:
+            # callback fail KHÔNG đổi job status (job đã done/failed thì vẫn vậy).
+            await self._notify_callback(job_id, payload)
+
+    async def _notify_callback(self, job_id: str, payload: dict[str, Any]) -> None:
+        callback_url = payload.get("callback_url")
+        if not callback_url:
+            return
+        job = await self._store.get(job_id)
+        if job is None or job.status not in ("done", "failed"):
+            return
+
+        body = {
+            "job_id": job.job_id,
+            "job_type": job.job_type,
+            "filename": job.filename,
+            "status": job.status,
+            "chunks_added": job.chunks_added,
+            "pages": job.pages,
+            "error": job.error,
+            "duration_sec": (job.finished_at or 0) - (job.started_at or job.created_at),
+            "metadata": job.metadata,
+        }
+        try:
+            timeout = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(callback_url, json=body)
+                logger.info(
+                    "Callback %s for job %s → HTTP %d",
+                    callback_url[:60], job_id, resp.status_code,
+                )
+        except Exception as exc:
+            # Không retry — BE phải design nhận lại qua poll /jobs/{id} nếu webhook miss.
+            logger.warning("Callback failed for job %s: %s", job_id, exc)
 
     # --- Handlers ---
 
