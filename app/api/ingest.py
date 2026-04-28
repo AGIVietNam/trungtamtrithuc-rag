@@ -1046,9 +1046,27 @@ async def preview_from_url(payload: FromUrlRequest = Body(...)) -> dict:
     except ValueError as exc:
         return {"status": "error", "message": str(exc), "metadata": None}
 
-    # YouTube + stream platforms → reuse logic preview_youtube_metadata (yt-dlp)
+    # YouTube + stream platforms → reuse logic preview_youtube_metadata (yt-dlp),
+    # rồi normalize về cùng shape với document preview (title/description/domain/tags)
+    # để FE chỉ cần 1 contract cho /from-url/preview.
     if resolved.kind == "youtube":
-        return await preview_youtube_metadata(resolved.download_url)
+        yt_resp = await preview_youtube_metadata(resolved.download_url)
+        if yt_resp.get("status") != "ok" or not yt_resp.get("metadata"):
+            return yt_resp
+        ym = yt_resp["metadata"]
+        if ym.get("is_playlist"):
+            # Playlist giữ nguyên shape (FE cần video_count, playlist_title, ...)
+            return yt_resp
+        return {
+            "status": "ok",
+            "message": yt_resp.get("message", "Metadata đã gen từ URL."),
+            "metadata": {
+                "title": ym.get("title", ""),
+                "description": ym.get("description", ""),
+                "domain": ym.get("domain", ""),
+                "tags": ym.get("tags") or [],
+            },
+        }
 
     # Document / video / audio → download tạm + parse đoạn đầu
     headers = payload.headers or {}
