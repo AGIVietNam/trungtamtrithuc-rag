@@ -11,6 +11,7 @@ from app.config import CLAUDE_HAIKU_MODEL
 from app.core.claude_client import ClaudeClient
 from app.core.conv_memory import ConversationMemory
 from app.core.conv_query_rewriter import rewrite as rewrite_query
+from app.core.user_identity import UserIdentityStore
 from app.rag.faithfulness import check_faithfulness
 from app.rag.intent_gate import (
     classify_intent,
@@ -351,23 +352,39 @@ class RAGChain:
         claude: ClaudeClient,
         top_k: int = 10,
         rerank_top_k: int = 3,
+        user_identity: UserIdentityStore | None = None,
     ):
         self.retriever = retriever
         self.reranker = reranker
         self.claude = claude
         self.top_k = top_k
         self.rerank_top_k = rerank_top_k
+        # User identity — fallback cho user TỰ KHAI BÁO khi auth chưa wire.
+        # Key bằng user_id (cross-session) — đổi session vẫn nhớ tên cùng user.
+        # Khi backend pass user_name → store này không được đọc (auth ưu tiên).
+        self.user_identity = user_identity or UserIdentityStore()
 
-    @staticmethod
-    def _build_profile(user_name: str | None, user_role: str | None) -> dict:
-        """Convert auth context (user_name, user_role) → profile dict cho intent_gate.
+    def _build_profile(
+        self,
+        user_name: str | None,
+        user_role: str | None,
+        user_id: str | None = None,
+    ) -> dict:
+        """Convert auth + user-scoped self-introduction → profile dict.
 
-        Source of truth: backend auth (JWT/session). AI module KHÔNG persist —
-        mỗi turn nhận lại profile fresh từ request.
+        Order of precedence:
+          1. ``user_name`` từ ChatRequest (auth) — source of truth, override mọi thứ.
+          2. ``self.user_identity.get(user_id).name`` — user TỰ khai báo (vd:
+             "Tôi là Quốc Tuấn") trong bất kỳ session nào trước đó khi auth
+             chưa wire. Cross-session, in-memory, TTL 7 ngày.
+          3. {} — không biết tên user → AI fallback canned generic.
         """
         profile: dict = {}
-        if user_name and user_name.strip():
-            profile["name"] = user_name.strip()
+        name = (user_name or "").strip()
+        if not name and user_id:
+            name = self.user_identity.get_name(user_id)
+        if name:
+            profile["name"] = name
         if user_role and user_role.strip():
             profile["role"] = user_role.strip()
         return profile
@@ -407,11 +424,15 @@ class RAGChain:
         # Profile từ auth context (user_name/user_role) — backend là source of truth.
         intent = classify_intent(query)
         if is_meta_intent(intent):
-            profile = self._build_profile(user_name, user_role)
-            text, _ = respond_to_meta(intent, query, profile)
+            profile = self._build_profile(user_name, user_role, user_id)
+            text, updates = respond_to_meta(intent, query, profile)
+            # INTRODUCE_USER → persist tên theo user_id (cross-session) cho
+            # turns/sessions sau. Chỉ khi không có auth name; auth luôn override.
+            if updates.get("name") and user_id and not (user_name and user_name.strip()):
+                self.user_identity.set_name(user_id, updates["name"])
             logger.info(
                 "intent gate hit: %s → canned (user=%s name=%s len=%d)",
-                intent, user_id or "-", profile.get("name", "-"), len(text),
+                intent, user_id or "-", profile.get("name") or updates.get("name") or "-", len(text),
             )
             return {
                 "answer": text,
@@ -501,7 +522,7 @@ class RAGChain:
         user_content = build_user_content(
             query, doc_blocks, conv_block,
             low_confidence=low_conf,
-            user_profile=self._build_profile(user_name, user_role),
+            user_profile=self._build_profile(user_name, user_role, user_id),
         )
         messages = list(history) + [{"role": "user", "content": user_content}]
 
@@ -634,11 +655,13 @@ class RAGChain:
         # Stream path: emit meta + delta + done với canned text, không gọi Claude.
         intent = classify_intent(query)
         if is_meta_intent(intent):
-            profile = self._build_profile(user_name, user_role)
-            text, _ = respond_to_meta(intent, query, profile)
+            profile = self._build_profile(user_name, user_role, user_id)
+            text, updates = respond_to_meta(intent, query, profile)
+            if updates.get("name") and user_id and not (user_name and user_name.strip()):
+                self.user_identity.set_name(user_id, updates["name"])
             logger.info(
                 "intent gate hit (stream): %s → canned (user=%s name=%s len=%d)",
-                intent, user_id or "-", profile.get("name", "-"), len(text),
+                intent, user_id or "-", profile.get("name") or updates.get("name") or "-", len(text),
             )
             yield {
                 "type": "meta",
@@ -728,7 +751,7 @@ class RAGChain:
         user_content = build_user_content(
             query, doc_blocks, conv_block,
             low_confidence=low_conf,
-            user_profile=self._build_profile(user_name, user_role),
+            user_profile=self._build_profile(user_name, user_role, user_id),
         )
         messages = list(history) + [{"role": "user", "content": user_content}]
 

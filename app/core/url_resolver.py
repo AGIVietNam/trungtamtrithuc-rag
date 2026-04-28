@@ -164,12 +164,22 @@ def _resolve_sharepoint(url: str) -> ResolvedUrl | None:
             source="sharepoint_anon",
         )
 
-    # Mọi link SharePoint khác (stream.aspx, /personal/, /sites/...) → cần
-    # Microsoft Graph + access_token user. AI không tự xử lý được.
+    # Mọi link SharePoint khác (stream.aspx, /personal/, /sites/...) cần
+    # access_token Microsoft của user. AI không có token nên không tự tải được.
+    # Browser của user mở được vì có cookie + token, nhưng AI là service riêng
+    # → cần BE/FE forward token sang AI qua endpoint /from-urls với headers Bearer.
+    m = _SHAREPOINT_PATTERN.search(url)
+    tenant = m.group(1) if m else "?"
     raise ValueError(
-        "Link SharePoint nội bộ cần đăng nhập Microsoft. Vui lòng dùng "
-        "tính năng \"Đăng nhập Microsoft\" trên giao diện thay vì paste link, "
-        "hoặc BE phải resolve qua Microsoft Graph trước khi gửi sang AI."
+        f"Link SharePoint tenant '{tenant}' cần access_token Microsoft của user "
+        "để tải. AI service không có cookie/token (browser của bạn thì có, nên "
+        "bạn mở được trên trình duyệt). Để ingest:\n"
+        "(a) FE/BE forward access_token (đã có sau khi login Microsoft) sang AI "
+        "qua /from-urls với headers Bearer — đang chờ BE code phần Microsoft Graph "
+        "integration.\n"
+        "(b) Tạm thời: tải file về máy → upload qua tab \"Tài liệu\".\n"
+        "(c) Hoặc xin link share \"Anyone with link\" (URL `:b:/g/...`) — AI tải "
+        "được không cần auth."
     )
 
 
