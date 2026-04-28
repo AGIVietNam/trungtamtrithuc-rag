@@ -108,3 +108,14 @@ class FromUrlsItem(BaseModel):
 
 class FromUrlsRequest(BaseModel):
     items: list[FromUrlsItem]
+
+
+class FromUrlRequest(BaseModel):
+    """Ingest 1 URL public — AI tự resolve theo nguồn (Google Drive, OneDrive,
+    Dropbox, YouTube, generic HTTP). Cho link private (SharePoint nội bộ),
+    BE phải resolve qua Microsoft Graph rồi đẩy `/from-urls` với headers token.
+    """
+    url: str
+    filename: str | None = None      # nếu trống, AI đoán từ URL/Content-Disposition
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    headers: dict[str, str] | None = None

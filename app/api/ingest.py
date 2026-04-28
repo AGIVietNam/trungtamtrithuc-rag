@@ -14,6 +14,7 @@ from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 from app.schemas import (
     BatchSubmitResponse,
     BatchStatusResponse,
+    FromUrlRequest,
     FromUrlsRequest,
     IngestResponse,
     JobStatusResponse,
@@ -1026,6 +1027,69 @@ async def ingest_files_batch(
         jobs=submitted,
         errors=errors,
     )
+
+
+@router.post("/from-url", response_model=JobSubmitResponse)
+async def ingest_from_url(payload: FromUrlRequest = Body(...)) -> JobSubmitResponse:
+    """Ingest 1 URL public bất kỳ — auto-detect Google Drive / OneDrive / Dropbox /
+    YouTube / generic. AI tự resolve sang download URL trực tiếp + dispatch sang
+    pipeline phù hợp (document / video_file / youtube).
+
+    Cho SharePoint TDI / private link cần auth, dùng `/from-urls` với
+    headers Bearer token (BE resolve qua Graph trước).
+    """
+    from app.core.url_resolver import resolve
+
+    if not payload.url.strip():
+        raise HTTPException(status_code=400, detail="URL bắt buộc.")
+
+    meta = payload.metadata or {}
+    domain_err = _validate_domain(str(meta.get("domain", "")))
+    if domain_err:
+        raise HTTPException(status_code=400, detail=domain_err)
+
+    try:
+        resolved = resolve(payload.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    store = get_store()
+    runner = get_runner()
+    filename = payload.filename or resolved.suggested_filename or "download"
+
+    if resolved.kind == "youtube":
+        is_playlist = _is_playlist_url(resolved.download_url)
+        yt_meta = {"domain": meta["domain"]} if (is_playlist and meta.get("domain")) else (meta or None)
+        job = await store.create_job(
+            job_type="youtube",
+            filename=resolved.download_url,
+            metadata={"is_playlist": is_playlist, "source": resolved.source},
+        )
+        await runner.submit(job, payload={
+            "url": resolved.download_url,
+            "is_playlist": is_playlist,
+            "metadata": yt_meta,
+        })
+        return JobSubmitResponse(job_id=job.job_id, filename=resolved.download_url)
+
+    # Document / video / audio: download trong worker rồi ingest
+    job_type = "document" if resolved.kind in ("document", "audio_file") else "video_file"
+    if resolved.kind == "audio_file":
+        # Audio reuse video pipeline (Whisper transcribe)
+        job_type = "video_file"
+
+    job = await store.create_job(
+        job_type=job_type,
+        filename=filename,
+        metadata={"source": resolved.source, "kind": resolved.kind},
+    )
+    await runner.submit(job, payload={
+        "download_url": resolved.download_url,
+        "headers": payload.headers or {},
+        "filename": filename,
+        "metadata": meta,
+    })
+    return JobSubmitResponse(job_id=job.job_id, filename=filename)
 
 
 @router.post("/from-urls", response_model=BatchSubmitResponse)

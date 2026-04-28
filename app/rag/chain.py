@@ -12,6 +12,11 @@ from app.core.claude_client import ClaudeClient
 from app.core.conv_memory import ConversationMemory
 from app.core.conv_query_rewriter import rewrite as rewrite_query
 from app.rag.faithfulness import check_faithfulness
+from app.rag.intent_gate import (
+    canned_response,
+    classify_intent,
+    is_meta_intent,
+)
 from app.rag.retriever import Retriever
 from app.rag.reranker import CrossEncoderReranker
 from app.rag.prompt_builder import (
@@ -329,6 +334,24 @@ class RAGChain:
             search_query = query
         t_rewrite = time.perf_counter()
 
+        # --- 1b. Intent gate (pre-retrieval).
+        # Greeting/identity/capability không retrieval-able → trả canned response,
+        # bypass cả retrieval lẫn Claude lẫn faithfulness gate. Tránh bug stream-rồi-
+        # ghi-đè-bằng-refusal khi câu chào dài >100 chars + citations==0.
+        intent = classify_intent(query)
+        if is_meta_intent(intent):
+            logger.info("intent gate hit: %s → canned response (skip retrieval+Claude)", intent)
+            return {
+                "answer": canned_response(intent),
+                "sources": [],
+                "confidence": "high",
+                "suggested_questions": [],
+                "rewritten_query": search_query if search_query != query else None,
+                "recall_count": 0,
+                "intent": intent,
+                "refused": False,
+            }
+
         # --- 2. Embed query 1 LẦN, reuse cho cả retriever + conv_memory.
         # Trước fix này, mỗi turn gọi Voyage 2 lần cho cùng 1 query → góp phần
         # đẩy free-tier 3 RPM vào 429 → backoff 25s × N retry.
@@ -527,6 +550,29 @@ class RAGChain:
         except Exception:
             search_query = query
         t_rewrite = time.perf_counter()
+
+        # Intent gate (pre-retrieval) — xem comment ở RAGChain.answer().
+        # Stream path: emit meta + delta + done với canned text, không gọi Claude.
+        intent = classify_intent(query)
+        if is_meta_intent(intent):
+            logger.info("intent gate hit (stream): %s → canned response", intent)
+            text = canned_response(intent)
+            yield {
+                "type": "meta",
+                "confidence": "high",
+                "rewritten_query": search_query if search_query != query else None,
+                "recall_count": 0,
+                "intent": intent,
+            }
+            yield {"type": "delta", "text": text}
+            yield {
+                "type": "done",
+                "answer": text,
+                "sources": [],
+                "suggested_questions": [],
+                "intent": intent,
+            }
+            return
 
         # Embed query 1 lần, reuse cho retriever + conv_memory.
         query_vec = self.retriever.voyage.embed_query(search_query)

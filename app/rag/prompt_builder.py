@@ -267,6 +267,12 @@ Bạn có thể:
 
 Khi refuse: KHÔNG thêm mục "Nguồn:" và KHÔNG thêm khối "---GỢI Ý---".
 Tuyệt đối không viết trả lời chung chung từ training data kiểu "Thông thường, về X thì...".
+
+NGOẠI LỆ — câu meta (chào hỏi, hỏi danh tính bạn/tôi, hỏi capability, cảm ơn, tạm biệt):
+- KHÔNG áp refusal template ở trên. Trả lời ngắn gọn 1-2 câu theo persona,
+  không kèm "Nguồn:" và không kèm "---GỢI Ý---".
+- Lưu ý: pipeline có intent gate ở pre-retrieval đã short-circuit phần lớn
+  case này. Nếu lọt tới đây nghĩa là gate miss biến thể → vẫn xử lý đúng tone.
 </refusal_protocol>
 
 <answer_format>
