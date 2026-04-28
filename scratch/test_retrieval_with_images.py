@@ -175,19 +175,6 @@ def main() -> int:
             _print_hit(h_idx, hit, retr_score=retr_scores.get(id(hit), 0.0))
         print(f"└──")
 
-    print(f"\n=== Done. Đánh giá thủ công ===")
-    print(f"- ✓ = chunk thuộc đúng doc vừa ingest.")
-    print(f"- type=image_caption = synthetic chunk (text=caption, 1 ảnh/chunk).")
-    print(f"- type=text          = chunk text gốc của doc (kéo theo cả lô ảnh của trang).")
-    print(f"")
-    print(f"Mong đợi sau STAGE 2 (rerank):")
-    print(f"  • Q caption-specific (sơ đồ kiến trúc, bounding box...): top-1 = image_caption đúng,")
-    print(f"    score rerank > 0.5 — pipeline production trả về đúng 1 ảnh phù hợp câu hỏi.")
-    print(f"  • Q text-relevant (chủ đề tài liệu, tóm tắt...): top-1 = text chunk gốc,")
-    print(f"    BGE re-rank text chunk lên trên image_caption — sửa quirk của Voyage similarity.")
-    print(f"")
-    print(f"Nếu rerank KHÔNG đẩy text chunk lên top cho Q1 → cần tune reranker hoặc")
-    print(f"chấp nhận v1: BE aggregate hits theo doc_id, tự build sources card.")
     return 0
 
 
