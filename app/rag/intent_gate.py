@@ -23,8 +23,9 @@ logger = logging.getLogger(__name__)
 
 # --- Intent constants
 INTENT_GREETING = "greeting"
-INTENT_IDENTITY_BOT = "identity_bot"
-INTENT_IDENTITY_USER = "identity_user"
+INTENT_IDENTITY_BOT = "identity_bot"        # "bạn là ai"
+INTENT_IDENTITY_USER = "identity_user"      # "tôi là ai" (HỎI)
+INTENT_INTRODUCE_USER = "introduce_user"    # "tôi là Tuấn" (KHAI BÁO)
 INTENT_CAPABILITY = "capability"
 INTENT_THANKS = "thanks"
 INTENT_GOODBYE = "goodbye"
@@ -55,6 +56,24 @@ _IDENTITY_USER_RE = re.compile(
     r"[\s.!?,]*\??$",
     re.IGNORECASE,
 )
+
+# "tôi là Tuấn" / "mình tên là An" / "em tên Hoa" / "tôi gọi là X".
+# KHÁC IDENTITY_USER: name KHÔNG phải "ai"/"gì"/"người nào" — đây là KHAI BÁO.
+# Order trong classify_intent: IDENTITY_USER check TRƯỚC → "tôi là ai" không
+# rơi vào regex này.
+_INTRODUCE_USER_RE = re.compile(
+    r"^\s*(?:tôi|mình|em|tớ|tao|cháu|con|anh|chị)\s+"
+    r"(?:tên\s+là\s+|tên\s+|là\s+|gọi\s+là\s+)"
+    r"([^,.!?;:\n]{1,40}?)"
+    r"[\s.!?,]*$",
+    re.IGNORECASE,
+)
+
+# Tránh case lọt qua IDENTITY_USER: nếu name extract ra là từ hỏi → bỏ.
+# Defensive — bình thường IDENTITY_USER đã catch trước.
+_INTRODUCE_NAME_BLACKLIST: frozenset[str] = frozenset({
+    "ai", "gì", "người nào", "ai vậy", "ai đây", "ai nhỉ", "gì vậy", "gì nhỉ",
+})
 
 _CAPABILITY_RE = re.compile(
     r"^\s*(bạn|cậu|em|mày)\s+("
@@ -106,6 +125,9 @@ def classify_intent(query: str) -> str:
         return INTENT_IDENTITY_BOT
     if _IDENTITY_USER_RE.match(q):
         return INTENT_IDENTITY_USER
+    if _INTRODUCE_USER_RE.match(q) and _extract_introduced_name(q):
+        # Chỉ commit INTRODUCE nếu extract được name "thật" (không phải từ hỏi).
+        return INTENT_INTRODUCE_USER
     if _CAPABILITY_RE.match(q):
         return INTENT_CAPABILITY
     if _THANKS_RE.match(q):
@@ -115,6 +137,22 @@ def classify_intent(query: str) -> str:
     if _GREETING_RE.match(q):
         return INTENT_GREETING
     return INTENT_RAG
+
+
+def _extract_introduced_name(query: str) -> str:
+    """Lấy phần name từ 'tôi là <name>'. Trả '' nếu không match / name là từ hỏi.
+
+    Capitalize từng từ + cap length 30 chars để không inject text dài lạ
+    vào canned response.
+    """
+    m = _INTRODUCE_USER_RE.match((query or "").strip())
+    if not m:
+        return ""
+    raw = m.group(1).strip()
+    if not raw or raw.lower() in _INTRODUCE_NAME_BLACKLIST:
+        return ""
+    cleaned = " ".join(w.capitalize() for w in raw.split() if w)
+    return cleaned[:30]
 
 
 # --- Canned responses
@@ -152,8 +190,21 @@ _CANNED: dict[str, str] = {
 }
 
 
-def canned_response(intent: str) -> str:
-    """Lấy canned response cho intent. Trả "" nếu intent không có canned (RAG)."""
+def canned_response(intent: str, query: str = "") -> str:
+    """Lấy canned response cho intent. Trả "" nếu intent không có canned (RAG).
+
+    ``query`` chỉ dùng cho INTENT_INTRODUCE_USER để personalize ("Chào bạn Tuấn!").
+    Các intent khác bỏ qua param này.
+    """
+    if intent == INTENT_INTRODUCE_USER:
+        name = _extract_introduced_name(query)
+        if name:
+            return (
+                f"Chào bạn {name}! Rất vui được gặp. Tôi là Trợ lý đọc tài liệu "
+                f"của TDI Group, sẵn sàng giúp bạn tra cứu thông tin về dự án, "
+                f"quy trình và tài liệu nội bộ TDI. Bạn cần hỗ trợ gì hôm nay?"
+            )
+        return _CANNED[INTENT_GREETING]
     return _CANNED.get(intent, "")
 
 

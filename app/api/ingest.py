@@ -209,7 +209,7 @@ async def ingest_file(
 # Chỉ parse file và gọi Haiku, KHÔNG upsert Qdrant. FE dùng để prefill form.
 # ---------------------------------------------------------------------------
 
-_DOC_SUFFIXES = {".pdf", ".docx", ".doc", ".txt", ".md", ".xlsx"}
+_DOC_SUFFIXES = {".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md", ".xlsx"}
 
 
 @router.post("/file/preview")

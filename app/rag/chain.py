@@ -102,6 +102,56 @@ _URL_PATTERN = re.compile(
 )
 
 
+# Patterns nhận diện fact cụ thể (số liệu, ngày, URL, chuẩn, tham chiếu pháp luật).
+# Khi answer match >=1 pattern → có claim → faithfulness gate phải verify.
+# Khi answer KHÔNG match → response thuần xã giao/lễ phép → trust LLM, skip gate.
+#
+# Lý do thiết kế: gate cũ trip khi `citations==0 AND len(answer)>100` — bị false
+# positive trên MỌI câu xã giao dài (chào hỏi có persona, intro tên user, capability
+# description...). Bug này xuất hiện cho mọi user, không enumerate hết được bằng
+# intent regex. Fix gốc rễ: chỉ trip khi answer chứa CLAIM cần grounding.
+#
+# Trade-off: pattern bỏ sót sẽ lọt soft-hallucination dạng "TDI là tập đoàn lớn
+# nhất VN" (không số/ngày). Chấp nhận vì alternative (always-trip) gây UX bug
+# nghiêm trọng hơn. Layer 1 URL fabrication vẫn chạy độc lập với mọi answer.
+_FACTUAL_CLAIM_PATTERNS: list[re.Pattern] = [
+    re.compile(r"https?://", re.IGNORECASE),
+    re.compile(r"\b(19|20)\d{2}\b"),                                # Years 1900-2099
+    re.compile(r"\d+([.,]\d+)?\s*(%|‰)"),                            # Percentages
+    re.compile(
+        r"\d+([.,]\d+)?\s*"
+        r"(triệu|tỷ|nghìn|đồng|usd|eur|vnd|"
+        r"km|cm|mm|kg|tấn|m²|m2|m³|m3|ha|"
+        r"giờ|phút|giây|ngày|tuần|tháng|năm|"
+        r"chi\s+nhánh|nhân\s+viên|cán\s+bộ|dự\s+án|hợp\s+đồng|sản\s+phẩm|khách\s+hàng)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(ISO|TCVN|QCVN|ASTM|NFPA|IEC|EN)\s*\d+", re.IGNORECASE),
+    re.compile(r"\b(điều|khoản|điểm|chương|mục|phụ\s+lục)\s+\d+", re.IGNORECASE),
+    re.compile(
+        r"\b(nghị\s+định|thông\s+tư|quyết\s+định|công\s+văn|luật)\s+(số\s+)?\d",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(thành\s+lập|sáng\s+lập|ra\s+đời|công\s+bố|ban\s+hành|ký\s+kết|"
+        r"phê\s+duyệt|khai\s+trương|khánh\s+thành)\b.{0,30}\d",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b\d{4,}\b"),                                       # Big numbers (IDs/codes)
+]
+
+
+def _has_factual_claims(text: str) -> bool:
+    """True nếu text chứa fact cần grounding (số/ngày/URL/chuẩn/tham chiếu).
+
+    False với câu xã giao thuần ("Chào bạn Tuấn!", "Cảm ơn bạn", "Tôi là Trợ
+    lý đọc tài liệu TDI...") — không có gì để hallucinate, cho phép skip gate.
+    """
+    if not text:
+        return False
+    return any(p.search(text) for p in _FACTUAL_CLAIM_PATTERNS)
+
+
 def _extract_urls(text: str) -> list[str]:
     """Lấy tất cả URL trong text. Strip ký tự cuối thường gặp (.,!?;:)."""
     raw = _URL_PATTERN.findall(text or "")
@@ -342,7 +392,7 @@ class RAGChain:
         if is_meta_intent(intent):
             logger.info("intent gate hit: %s → canned response (skip retrieval+Claude)", intent)
             return {
-                "answer": canned_response(intent),
+                "answer": canned_response(intent, query),
                 "sources": [],
                 "confidence": "high",
                 "suggested_questions": [],
@@ -458,9 +508,8 @@ class RAGChain:
         if (
             hits
             and not _looks_like_refusal(answer_text)
-            and not _looks_like_smalltalk(answer_text)
         ):
-            # Layer 1: URL fabrication
+            # Layer 1: URL fabrication — chạy với mọi answer (URL nguy hiểm bất kể độ dài).
             fab, fab_url = _has_fabricated_url(answer_text, hits)
             if fab:
                 logger.warning(
@@ -472,8 +521,10 @@ class RAGChain:
                 forced_refusal = True
                 forced_reason = f"fabricated_url:{fab_url[:80]}"
 
-            # Layer 2: faithfulness judge — chỉ khi không có citations
-            elif not citations:
+            # Layer 2: faithfulness judge — chỉ khi answer có factual claim
+            # AND không cite chunk nào. Skip cho câu xã giao thuần (no claim →
+            # không có gì để hallucinate, dù LLM tự dệt prose lễ phép).
+            elif not citations and _has_factual_claims(answer_text):
                 premise = "\n\n---\n\n".join(h.text.strip() for h in hits)
                 if len(premise) > 6000:
                     premise = premise[:6000] + "…"
@@ -556,7 +607,7 @@ class RAGChain:
         intent = classify_intent(query)
         if is_meta_intent(intent):
             logger.info("intent gate hit (stream): %s → canned response", intent)
-            text = canned_response(intent)
+            text = canned_response(intent, query)
             yield {
                 "type": "meta",
                 "confidence": "high",
@@ -673,14 +724,18 @@ class RAGChain:
         # Note: text đã stream ra client; FE thay thế bằng evt.answer trong
         # "done" event nếu refuse + show notice cho user (chat.html xử lý).
         forced_refusal = False
-        if hits and not _looks_like_refusal(full_text) and not _looks_like_smalltalk(full_text):
+        if hits and not _looks_like_refusal(full_text):
+            # Layer 1 chạy với mọi answer — URL fabrication không phụ thuộc độ dài.
             fab, fab_url = _has_fabricated_url(full_text, hits)
             if fab:
                 logger.warning("URL fabrication (stream): %s", fab_url)
                 full_text = _REFUSAL_TEMPLATE
                 citations = []
                 forced_refusal = True
-            elif not citations:
+            # Layer 2 chỉ chạy khi answer có factual claim (số/URL/ngày/chuẩn).
+            # Smalltalk thuần (chào, lễ phép, không số) → skip để tránh override
+            # response hợp lệ thành refusal template.
+            elif not citations and _has_factual_claims(full_text):
                 premise = "\n\n---\n\n".join(h.text.strip() for h in hits)
                 if len(premise) > 6000:
                     premise = premise[:6000] + "…"
