@@ -86,6 +86,10 @@ def _fix_common_typos(text: str) -> str:
 def _clean_markdown(md: str) -> str:
     md = re.sub(r"<!--.*?-->", "", md, flags=re.DOTALL)
     md = re.sub(r"-{3,}\s*page\s*\d*\s*-{3,}", "", md, flags=re.IGNORECASE)
+    # Remove Docling image placeholders (![image](...), ![Image 1](...), etc.)
+    md = re.sub(r"!\[(?:image|Image\s*#?\d*|Figure\s*#?\d*|Picture\s*#?\d*|Photo\s*#?\d*)\]\([^)]*\)", "", md, flags=re.IGNORECASE)
+    # Remove bare bracketed placeholders like [Image #1], [Figure 2]
+    md = re.sub(r"\[(?:Image|Figure|Picture|Photo)\s*#?\d+\](?!\()", "", md, flags=re.IGNORECASE)
     md = re.sub(r"\n{3,}", "\n\n", md)
     lines = [line.rstrip() for line in md.split("\n")]
     return "\n".join(lines).strip()
@@ -143,24 +147,76 @@ def _get_docling_converter():
     return _docling_converter
 
 
-def _docling_parse(path: Path) -> str:
+def _docling_split_pages(doc) -> list[dict]:
+    """Extract per-page content from Docling DoclingDocument. Returns [] on failure."""
+    pages_content: dict[int, list[str]] = {}
+    try:
+        iterate = getattr(doc, "iterate_items", None)
+        if iterate is None:
+            return []
+        for item, _level in iterate():
+            if "Picture" in type(item).__name__ or "Image" in type(item).__name__:
+                continue
+            provs = getattr(item, "prov", None)
+            if not provs:
+                continue
+            page_no = getattr(provs[0], "page_no", None)
+            if not isinstance(page_no, int):
+                continue
+            text = ""
+            if hasattr(item, "export_to_markdown"):
+                try:
+                    text = item.export_to_markdown() or ""
+                except Exception:
+                    text = getattr(item, "text", "") or ""
+            else:
+                text = getattr(item, "text", "") or ""
+            text = text.strip()
+            if text:
+                pages_content.setdefault(page_no, []).append(text)
+    except Exception:
+        logger.warning("Docling page iteration failed, falling back to single-page")
+        return []
+
+    result: list[dict] = []
+    for page_no in sorted(pages_content.keys()):
+        text = "\n\n".join(pages_content[page_no])
+        text = _clean_markdown(text)
+        text = _fix_joined_words(text)
+        if _count_meaningful_chars(text) >= MIN_TEXT_CHARS:
+            result.append({"page": page_no, "text": text})
+    return result
+
+
+def _docling_parse(path: Path) -> list[dict]:
+    """Parse via Docling. Returns list[{"page": N, "text": md}], empty on failure/rejection."""
     converter = _get_docling_converter()
     if converter is None:
-        return ""
+        return []
     try:
         result = converter.convert(source=str(path))
-        md = result.document.export_to_markdown()
-        md = _clean_markdown(md)
-        md = _fix_joined_words(md)
-        is_good, reason = _check_docling_quality(md)
+        doc = result.document
+
+        # Quality check on full document text
+        full_md = _clean_markdown(_fix_joined_words(doc.export_to_markdown()))
+        is_good, reason = _check_docling_quality(full_md)
         if not is_good:
             logger.warning("Docling REJECTED for %s: %s", path.name, reason)
-            return ""
-        logger.info("Docling OK for %s: %d chars", path.name, len(md))
-        return md
+            return []
+
+        # Multi-page: try per-page split via document structure
+        num_pages = len(getattr(doc, "pages", {}))
+        if num_pages > 1:
+            pages = _docling_split_pages(doc)
+            if pages:
+                logger.info("Docling OK for %s: %d pages", path.name, len(pages))
+                return pages
+
+        logger.info("Docling OK for %s: %d chars (single page)", path.name, len(full_md))
+        return [{"page": 1, "text": full_md}]
     except Exception:
         logger.exception("Docling failed for %s", path.name)
-        return ""
+        return []
 
 
 # --- Tier 2: Claude Vision ---
@@ -263,10 +319,10 @@ def _count_pdf_pages(path: Path) -> int:
 # --- Main PDF parser ---
 
 def parse_pdf(path: Path) -> list[dict]:
-    # Tier 1: Docling — always return if quality OK
-    markdown = _docling_parse(path)
-    if markdown and _count_meaningful_chars(markdown) >= MIN_TEXT_CHARS:
-        return [{"page": 1, "text": markdown}]
+    # Tier 1: Docling — returns per-page list if quality OK
+    pages = _docling_parse(path)
+    if pages:
+        return pages
 
     # Tier 2: Vision (Docling failed → context mode)
     logger.info("PDF %s: Docling failed, trying Vision", path.name)

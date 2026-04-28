@@ -156,6 +156,10 @@ def _strip_markdown_formatting(text: str) -> str:
     text = re.sub(r"_(.+?)_", r"\1", text)
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^-{3,}$", "", text, flags=re.MULTILINE)
+    # Remove Docling image placeholders entirely (before general image handling)
+    text = re.sub(r"!\[(?:image|Image\s*#?\d*|Figure\s*#?\d*|Picture\s*#?\d*|Photo\s*#?\d*)\]\([^)]*\)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\[(?:Image|Figure|Picture|Photo)\s*#?\d+\](?!\()", "", text, flags=re.IGNORECASE)
+    # Remaining images: keep meaningful alt text
     text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"`(.+?)`", r"\1", text)
