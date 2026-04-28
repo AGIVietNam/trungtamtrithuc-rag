@@ -1029,6 +1029,113 @@ async def ingest_files_batch(
     )
 
 
+@router.post("/from-url/preview")
+async def preview_from_url(payload: FromUrlRequest = Body(...)) -> dict:
+    """Preview metadata cho 1 URL public (Google Drive/OneDrive/Dropbox/YouTube/Stream/generic).
+
+    Tải đoạn đầu (5 trang doc / 3 phút video) → Haiku gen metadata →
+    trả JSON cho FE prefill form. KHÔNG upsert Qdrant.
+    """
+    from app.core.url_resolver import resolve
+
+    if not payload.url.strip():
+        return {"status": "error", "message": "URL bắt buộc.", "metadata": None}
+
+    try:
+        resolved = resolve(payload.url)
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc), "metadata": None}
+
+    # YouTube + stream platforms → reuse logic preview_youtube_metadata (yt-dlp)
+    if resolved.kind == "youtube":
+        return await preview_youtube_metadata(resolved.download_url)
+
+    # Document / video / audio → download tạm + parse đoạn đầu
+    headers = payload.headers or {}
+    suffix = Path(resolved.suggested_filename).suffix or ".bin"
+    tmp_path = Path(tempfile.mktemp(suffix=suffix))
+    t0 = time.perf_counter()
+
+    # Cap kích thước preview: 100MB là đủ cho 5 trang đầu PDF/PPTX/3 phút video
+    PREVIEW_MAX_BYTES = 100 * 1024 * 1024
+    written = 0
+
+    try:
+        import httpx
+        timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with client.stream("GET", resolved.download_url, headers=headers) as resp:
+                if not (200 <= resp.status_code < 300):
+                    return {
+                        "status": "error",
+                        "message": f"Không tải được URL (HTTP {resp.status_code}).",
+                        "metadata": None,
+                    }
+                ctype = (resp.headers.get("content-type") or "").lower()
+                if ctype.startswith("text/html") and not resolved.suggested_filename.endswith((".html", ".htm")):
+                    return {
+                        "status": "error",
+                        "message": "URL trả về HTML — có thể cần đăng nhập hoặc link không phải file.",
+                        "metadata": None,
+                    }
+                with tmp_path.open("wb") as f:
+                    async for chunk in resp.aiter_bytes(UPLOAD_STREAM_CHUNK):
+                        written += len(chunk)
+                        if written > PREVIEW_MAX_BYTES:
+                            break  # đủ cho 5 trang đầu rồi
+                        f.write(chunk)
+        t_download = time.perf_counter()
+
+        # Dispatch parser theo kind
+        if resolved.kind == "video_file" or resolved.kind == "audio_file":
+            from app.ingestion.video_transcriber import get_transcriber
+            transcriber = get_transcriber()
+            result = transcriber.transcribe(tmp_path, clip_duration_sec=PREVIEW_VIDEO_CLIP_SEC)
+            segments = result.get("segments", [])
+            text_sample = " ".join(s.get("text", "").strip() for s in segments if s.get("text", "").strip())
+        else:
+            # document
+            from app.ingestion.doc_parser import parse
+            parsed = parse(tmp_path, max_pages=PREVIEW_MAX_PAGES)
+            raw = parsed.get("content", "")
+            if isinstance(raw, list):
+                text_sample = "\n\n".join(p.get("text", "") for p in raw if p.get("text", "").strip())
+            else:
+                text_sample = str(raw)
+        t_parse = time.perf_counter()
+
+        meta = generate_document_metadata(
+            text_sample=text_sample,
+            filename=resolved.suggested_filename or "url-content",
+        )
+        t_ai = time.perf_counter()
+
+        logger.info(
+            "POST /from-url/preview steps (%s, %s): download=%.2fs parse=%.2fs ai=%.2fs total=%.2fs (sample=%d chars)",
+            resolved.source, resolved.kind,
+            t_download - t0, t_parse - t_download, t_ai - t_parse, t_ai - t0,
+            len(text_sample),
+        )
+
+        if meta is None:
+            return {
+                "status": "partial",
+                "message": "Không gen được metadata (nội dung quá ngắn hoặc LLM lỗi).",
+                "metadata": None,
+            }
+
+        return {
+            "status": "ok",
+            "message": "Metadata đã gen từ URL.",
+            "metadata": meta.model_dump(),
+        }
+    except Exception as exc:
+        logger.exception("Preview from-url error: %s", exc)
+        return {"status": "error", "message": f"Lỗi: {exc}", "metadata": None}
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 @router.post("/from-url", response_model=JobSubmitResponse)
 async def ingest_from_url(payload: FromUrlRequest = Body(...)) -> JobSubmitResponse:
     """Ingest 1 URL public bất kỳ — auto-detect Google Drive / OneDrive / Dropbox /

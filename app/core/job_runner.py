@@ -25,6 +25,10 @@ from app.core.job_store import InMemoryJobStore, JobStatus
 logger = logging.getLogger(__name__)
 
 
+def _filename_looks_like_html(name: str) -> bool:
+    return name.lower().endswith((".html", ".htm"))
+
+
 class JobRunner:
     def __init__(self, store: InMemoryJobStore, concurrency: int = 2) -> None:
         self._store = store
@@ -200,22 +204,95 @@ class JobRunner:
             timeout = httpx.Timeout(connect=30.0, read=None, write=None, pool=30.0)
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
                 async with client.stream("GET", url, headers=headers) as resp:
-                    resp.raise_for_status()
+                    self._validate_response(resp, url)
+
+                    # Override filename theo Content-Disposition nếu server cung cấp
+                    cd_name = self._filename_from_content_disposition(resp.headers.get("content-disposition"))
+                    if cd_name:
+                        payload["filename"] = cd_name
+
+                    # Detect HTML body sớm = login page / error page → reject thay
+                    # vì để Docling parse rác. Generic content-type cho file là
+                    # application/*, video/*, image/*, text/plain, ...
+                    ctype = (resp.headers.get("content-type") or "").lower()
+                    if ctype.startswith("text/html") and not _filename_looks_like_html(payload.get("filename") or ""):
+                        raise ValueError(
+                            "Nội dung tải về là HTML — link có thể yêu cầu đăng nhập, "
+                            "đã bị xoá, hoặc trỏ tới trang web thay vì file. "
+                            f"Status: {resp.status_code}, URL cuối: {str(resp.url)[:100]}"
+                        )
+
                     with tmp.open("wb") as f:
                         async for chunk in resp.aiter_bytes(UPLOAD_STREAM_CHUNK):
                             written += len(chunk)
                             if written > max_bytes:
                                 raise ValueError(
-                                    f"download exceeds MAX_UPLOAD_MB={MAX_UPLOAD_MB}"
+                                    f"File vượt quá giới hạn {MAX_UPLOAD_MB} MB."
                                 )
                             f.write(chunk)
+        except httpx.HTTPStatusError as exc:
+            tmp.unlink(missing_ok=True)
+            raise ValueError(self._friendly_http_error(exc, url)) from exc
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
 
+        if written == 0:
+            tmp.unlink(missing_ok=True)
+            raise ValueError(
+                "File tải về 0 byte — có thể link không tồn tại, đã bị xoá, "
+                "hoặc cần quyền truy cập."
+            )
+
         # Mark file_path nội bộ — để cleanup biết phải xoá
         payload["_downloaded_tmp"] = str(tmp)
         return tmp
+
+    @staticmethod
+    def _validate_response(resp: httpx.Response, original_url: str) -> None:
+        """Raise HTTPStatusError với context nếu response không 2xx."""
+        if 200 <= resp.status_code < 300:
+            return
+        # raise_for_status() bỏ vào except phía trên để format friendly
+        resp.raise_for_status()
+
+    @staticmethod
+    def _friendly_http_error(exc: httpx.HTTPStatusError, url: str) -> str:
+        """Format error message thân thiện theo HTTP status."""
+        code = exc.response.status_code
+        url_short = url[:120]
+        if code == 401:
+            return f"Link cần đăng nhập (401). Nếu là link nội bộ (SharePoint/OneDrive), BE cần resolve qua Microsoft Graph trước. URL: {url_short}"
+        if code == 403:
+            return f"Không có quyền truy cập link (403). Link có thể là nội bộ hoặc đã thu hồi quyền share. URL: {url_short}"
+        if code == 404:
+            return f"Link không tồn tại (404). URL: {url_short}"
+        if code == 429:
+            return f"Nguồn rate-limit (429). Thử lại sau ít phút. URL: {url_short}"
+        if 500 <= code < 600:
+            return f"Server nguồn lỗi ({code}). Có thể tạm thời, thử lại sau. URL: {url_short}"
+        return f"HTTP {code} khi tải. URL: {url_short}"
+
+    @staticmethod
+    def _filename_from_content_disposition(header: str | None) -> str | None:
+        """Extract filename từ header `attachment; filename="abc.pdf"` hoặc filename*=UTF-8''..."""
+        if not header:
+            return None
+        import re
+        from urllib.parse import unquote
+        # filename*=UTF-8''encoded-name (RFC 5987)
+        m = re.search(r"filename\*\s*=\s*[^']*'[^']*'([^;]+)", header, re.IGNORECASE)
+        if m:
+            return unquote(m.group(1).strip().strip('"'))
+        # filename="abc.pdf"
+        m = re.search(r'filename\s*=\s*"([^"]+)"', header, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        # filename=abc.pdf
+        m = re.search(r'filename\s*=\s*([^;]+)', header, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+        return None
 
     @staticmethod
     def _cleanup_temp(payload: dict[str, Any], file_path: Path) -> None:
