@@ -498,7 +498,11 @@ class RAGChain:
         conv_block = build_conversation_block(summary, recall_pairs)
 
         low_conf = _top_score(hits) < _LOW_CONFIDENCE_SCORE
-        user_content = build_user_content(query, doc_blocks, conv_block, low_confidence=low_conf)
+        user_content = build_user_content(
+            query, doc_blocks, conv_block,
+            low_confidence=low_conf,
+            user_profile=self._build_profile(user_name, user_role),
+        )
         messages = list(history) + [{"role": "user", "content": user_content}]
 
         result = self.claude.generate_with_citations(
@@ -721,7 +725,11 @@ class RAGChain:
         conv_block = build_conversation_block(summary, recall_pairs)
 
         low_conf = _top_score(hits) < _LOW_CONFIDENCE_SCORE
-        user_content = build_user_content(query, doc_blocks, conv_block, low_confidence=low_conf)
+        user_content = build_user_content(
+            query, doc_blocks, conv_block,
+            low_confidence=low_conf,
+            user_profile=self._build_profile(user_name, user_role),
+        )
         messages = list(history) + [{"role": "user", "content": user_content}]
 
         top_score = hits[0].score if hits else 0.0

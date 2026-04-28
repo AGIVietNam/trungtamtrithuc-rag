@@ -763,11 +763,50 @@ _TASK_REMINDER_CITATIONS = (
 )
 
 
+def build_user_identity_block(user_profile: dict | None) -> str:
+    """XML block <user_identity> — auth context (tên/vai trò user đã đăng nhập).
+
+    Backend (NestJS) decode JWT → IUser.fullName/role → forward qua ChatRequest
+    → chain.py truyền profile xuống đây. AI module KHÔNG persist, mỗi turn nhận
+    fresh.
+
+    Trả "" nếu profile rỗng (user chưa đăng nhập / dev mode).
+
+    Lý do tách block riêng (không trộn với <user_context>): đây là FACT từ auth
+    server, được phép cite/dùng để xưng hô. Khác với conv_recall là "có thể bot
+    cũ hallucinate".
+    """
+    if not user_profile:
+        return ""
+    name = (user_profile.get("name") or "").strip()
+    role = (user_profile.get("role") or "").strip()
+    if not name and not role:
+        return ""
+
+    lines = [
+        "<user_identity>",
+        "Người dùng đang trò chuyện đã đăng nhập với hệ thống. Thông tin này "
+        "ĐÚNG (từ auth server, không phải bot cũ):",
+    ]
+    if name:
+        lines.append(f"- Tên: {name}")
+    if role:
+        lines.append(f"- Vai trò: {role}")
+    lines.append(
+        "Khi user hỏi về danh tính của họ ('tôi là ai', 'bạn có biết tôi'...) "
+        "→ trả lời bằng tên/vai trò trên. Khi xưng hô, dùng tên đầy đủ hoặc "
+        "tên gọi ngắn nếu phù hợp ngữ cảnh."
+    )
+    lines.append("</user_identity>")
+    return "\n".join(lines)
+
+
 def build_user_content(
     query: str,
     doc_blocks: list[dict],
     conv_block: str,
     low_confidence: bool = False,
+    user_profile: dict | None = None,
 ) -> list[dict]:
     """Ráp user message dạng list content cho Anthropic Citations API.
 
@@ -776,14 +815,17 @@ def build_user_content(
           {type:document, citations:{enabled:true}, ...},   # hit 1
           {type:document, ...},                              # hit 2
           ...
-          {type:text, text: "<user_context>...<task>... Câu hỏi: ..."}
+          {type:text, text: "<user_identity>...<conv>...<task>... Câu hỏi: ..."}
         ]
 
     Document blocks ở TOP (long-context tip) — Anthropic cite được tới
-    char-range cụ thể trong từng block. Conv block + task reminder + query
-    đi vào 1 text block ở cuối.
+    char-range cụ thể trong từng block. user_identity (auth context) + conv
+    block + task reminder + query đi vào 1 text block ở cuối.
     """
     text_parts: list[str] = []
+    identity_block = build_user_identity_block(user_profile)
+    if identity_block:
+        text_parts.append(identity_block)
     if conv_block:
         text_parts.append(conv_block)
     if doc_blocks or conv_block:

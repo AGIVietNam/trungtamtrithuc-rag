@@ -57,6 +57,19 @@ _IDENTITY_USER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "bạn có biết tôi là ai không" / "bạn nhớ tôi không" / "bạn biết tên tôi không"
+# — biến thể: user asking bot to RECALL user identity. Đây vẫn là IDENTITY_USER
+# (user muốn biết bot có nhớ/biết về họ). Tách regex riêng vì pattern khác hẳn
+# IDENTITY_USER cơ bản (bắt đầu bằng "bạn" thay vì "tôi").
+_IDENTITY_USER_RECALL_RE = re.compile(
+    r"^\s*(bạn|cậu|em|mày)\s+"
+    r"(có\s+)?(biết|nhớ|còn\s+nhớ|biết\s+rõ)\s+"
+    r"(tên\s+|về\s+)?(tôi|mình|em)\b"
+    r".{0,40}?"
+    r"[\s.!?,]*\??$",
+    re.IGNORECASE,
+)
+
 # "tôi là Tuấn" / "mình tên là An" / "em tên Hoa" / "tôi gọi là X".
 # KHÁC IDENTITY_USER: name KHÔNG phải "ai"/"gì"/"người nào" — đây là KHAI BÁO.
 # Order trong classify_intent: IDENTITY_USER check TRƯỚC → "tôi là ai" không
@@ -123,7 +136,7 @@ def classify_intent(query: str) -> str:
 
     if _IDENTITY_BOT_RE.match(q):
         return INTENT_IDENTITY_BOT
-    if _IDENTITY_USER_RE.match(q):
+    if _IDENTITY_USER_RE.match(q) or _IDENTITY_USER_RECALL_RE.match(q):
         return INTENT_IDENTITY_USER
     if _INTRODUCE_USER_RE.match(q) and _extract_introduced_name(q):
         # Chỉ commit INTRODUCE nếu extract được name "thật" (không phải từ hỏi).
