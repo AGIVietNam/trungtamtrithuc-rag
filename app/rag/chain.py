@@ -370,30 +370,26 @@ class RAGChain:
         citations = result["citations"]
         t_claude = time.perf_counter()
 
-        # --- 4b. Anti-hallucination gate (Phase 1):
-        # Answer dài nhưng KHÔNG cite chunk nào → likely hallucinate. Force refusal.
+        # --- 4b. Faithfulness gate (Phase 3.3 nâng cấp — trọng tài thật):
+        # Skip nếu Claude tự refuse hoặc câu xã giao ngắn.
+        # Logic mới (sửa false-positive khi Claude paraphrase doc nhưng không
+        # emit native citations[]):
+        #   * citations non-empty → check on cited chunks (chính xác).
+        #   * citations rỗng + answer dài → check on FULL hits (paraphrase
+        #     có thể grounded dù Anthropic không attach citations[]).
+        # Fail-open: judge lỗi → KHÔNG refuse oan người dùng.
         forced_refusal = False
         forced_reason = ""
-        if hits and _is_hallucinated_uncited(answer_text, citations):
-            logger.warning(
-                "Citations gate TRIPPED: answer_len=%d citations=0 hits=%d "
-                "→ replacing with refusal template (top_score=%.4f)",
-                len(answer_text), len(hits), _top_score(hits),
-            )
-            answer_text = _REFUSAL_TEMPLATE
-            citations = []
-            forced_refusal = True
-            forced_reason = "citations_empty"
-
-        # --- 4c. Faithfulness gate (Phase 3.3) — Haiku 4.5 judge:
-        # Catch case "có citations nhưng paraphrase sai logic / cherry-pick".
-        # Skip nếu đã refuse (Phase 1 hoặc Claude tự refuse).
-        if (
-            citations
-            and not forced_refusal
-            and not _looks_like_refusal(answer_text)
-        ):
-            premise = _build_premise_from_citations(hits, citations)
+        if hits and not _looks_like_refusal(answer_text) and not _looks_like_smalltalk(answer_text):
+            if citations:
+                premise = _build_premise_from_citations(hits, citations)
+            else:
+                # Fallback premise: tất cả chunks đã retrieve. Phase 1 gate
+                # cũ ép citations==0 → refuse là quá khắt khe khi Claude
+                # paraphrase hợp lệ. Để Haiku judge quyết.
+                premise = "\n\n---\n\n".join(h.text.strip() for h in hits)
+                if len(premise) > 6000:
+                    premise = premise[:6000] + "…"
             grounded, reason = check_faithfulness(
                 self.claude, premise, answer_text, judge_model=CLAUDE_HAIKU_MODEL,
             )
@@ -561,34 +557,27 @@ class RAGChain:
                 full_text = evt["text"]
                 citations = evt["citations"]
 
-        # --- Anti-hallucination gates cho streaming path: nếu trip → ghi đè
-        # answer bằng refusal template + emit done event với answer mới.
-        # Lưu ý: text đã streaming ra client; FE sẽ thay thế khi nhận "done"
-        # (hiện chat.html dùng evt.answer trong done làm finalAnswer chính).
+        # --- Anti-hallucination gate cho streaming path (cùng logic answer()):
+        # Faithfulness judge là trọng tài duy nhất. Citations rỗng KHÔNG còn
+        # tự động trip — Claude có thể paraphrase grounded mà không emit native
+        # citations[]. Để judge quyết.
+        # Note: text đã stream ra client; FE thay thế bằng evt.answer trong
+        # "done" event nếu refuse (hiện chat.html xử lý đúng).
         forced_refusal = False
-        if hits and _is_hallucinated_uncited(full_text, citations):
-            logger.warning(
-                "Citations gate TRIPPED (stream): len=%d citations=0 hits=%d top_score=%.4f",
-                len(full_text), len(hits), top_score,
-            )
-            full_text = _REFUSAL_TEMPLATE
-            citations = []
-            forced_refusal = True
-
-        # Phase 3.3 faithfulness check (cùng logic answer())
-        if (
-            citations
-            and not forced_refusal
-            and not _looks_like_refusal(full_text)
-        ):
-            premise = _build_premise_from_citations(hits, citations)
+        if hits and not _looks_like_refusal(full_text) and not _looks_like_smalltalk(full_text):
+            if citations:
+                premise = _build_premise_from_citations(hits, citations)
+            else:
+                premise = "\n\n---\n\n".join(h.text.strip() for h in hits)
+                if len(premise) > 6000:
+                    premise = premise[:6000] + "…"
             grounded, reason = check_faithfulness(
                 self.claude, premise, full_text, judge_model=CLAUDE_HAIKU_MODEL,
             )
             if not grounded:
                 logger.warning(
-                    "Faithfulness gate TRIPPED (stream): %s | len=%d",
-                    reason, len(full_text),
+                    "Faithfulness gate TRIPPED (stream): %s | len=%d citations=%d",
+                    reason, len(full_text), len(citations),
                 )
                 full_text = _REFUSAL_TEMPLATE
                 citations = []
