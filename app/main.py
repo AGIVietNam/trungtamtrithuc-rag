@@ -69,7 +69,22 @@ async def _lifespan(app: FastAPI):
         await asyncio.to_thread(_warmup)
     except Exception as e:
         print(f"Warmup task failed: {e}")
+
+    # ── 5. Start async ingest worker pool ─────────────────────────────────────
+    try:
+        from app.core.job_runner import get_runner
+        await get_runner().start()
+    except Exception as e:
+        print(f"JobRunner start failed: {e}")
+
     yield
+
+    # ── Shutdown ──────────────────────────────────────────────────────────────
+    try:
+        from app.core.job_runner import get_runner
+        await get_runner().stop()
+    except Exception as e:
+        print(f"JobRunner stop failed: {e}")
 
 
 app = FastAPI(title="Trung Tâm Tri Thức", version="1.0.0", lifespan=_lifespan)

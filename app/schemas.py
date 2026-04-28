@@ -48,3 +48,63 @@ class KnowledgeSearchRequest(BaseModel):
 
 class KnowledgeSearchResponse(BaseModel):
     results: list[dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# Async ingest / batch upload
+# ---------------------------------------------------------------------------
+
+class JobSubmitResponse(BaseModel):
+    job_id: str
+    filename: str
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    job_type: str
+    filename: str
+    status: str
+    progress: float
+    chunks_added: int
+    pages: int
+    error: str | None = None
+    batch_id: str | None = None
+    created_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class BatchSubmitResponse(BaseModel):
+    batch_id: str
+    total: int
+    jobs: list[dict[str, Any]] = Field(default_factory=list)
+    errors: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class BatchStatusResponse(BaseModel):
+    batch_id: str
+    total: int
+    queued: int
+    in_progress: int
+    done: int
+    failed: int
+    chunks_added: int
+    jobs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class FromUrlsItem(BaseModel):
+    """1 item ingest qua URL — runner tự stream-download.
+
+    `metadata.domain` BẮT BUỘC (1 trong 10 slug) để route Qdrant đúng collection.
+    `headers` để truyền Bearer token cho SharePoint/Graph download URL.
+    """
+    download_url: str
+    filename: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    headers: dict[str, str] | None = None
+    size_bytes: int | None = None
+
+
+class FromUrlsRequest(BaseModel):
+    items: list[FromUrlsItem]

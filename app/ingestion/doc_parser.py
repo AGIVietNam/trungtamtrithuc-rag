@@ -328,7 +328,43 @@ def _count_pdf_pages(path: Path) -> int:
 
 # --- Main PDF parser ---
 
-def parse_pdf(path: Path) -> list[dict]:
+def _truncate_pdf(path: Path, max_pages: int) -> Path | None:
+    """Trả về tmp file PDF chỉ giữ N trang đầu. None nếu không cắt nổi."""
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError:
+        try:
+            from PyPDF2 import PdfReader, PdfWriter  # type: ignore
+        except ImportError:
+            logger.warning("pypdf/PyPDF2 not installed — preview parses full PDF")
+            return None
+    try:
+        import tempfile
+        reader = PdfReader(str(path))
+        if len(reader.pages) <= max_pages:
+            return None
+        writer = PdfWriter()
+        for i in range(min(max_pages, len(reader.pages))):
+            writer.add_page(reader.pages[i])
+        tmp = Path(tempfile.mktemp(suffix=".pdf"))
+        with tmp.open("wb") as f:
+            writer.write(f)
+        return tmp
+    except Exception:
+        logger.exception("Failed to truncate PDF for preview")
+        return None
+
+
+def parse_pdf(path: Path, max_pages: int | None = None) -> list[dict]:
+    # Preview path: cắt PDF trước khi đưa vào Docling — tiết kiệm 95% thời gian
+    # khi file 500 trang nhưng chỉ cần 5 trang đầu cho metadata gen.
+    if max_pages and max_pages > 0:
+        truncated = _truncate_pdf(path, max_pages)
+        if truncated is not None:
+            try:
+                return parse_pdf(truncated)
+            finally:
+                truncated.unlink(missing_ok=True)
     # Tier 1: Docling — returns per-page list if quality OK
     pages = _docling_parse(path)
     if pages:
@@ -349,13 +385,20 @@ def parse_pdf(path: Path) -> list[dict]:
 
 # --- XLSX (kept from teammate's code) ---
 
-def parse_xlsx(path: Path) -> str:
+def parse_xlsx(path: Path, max_rows: int | None = None) -> str:
     from openpyxl import load_workbook
-    wb = load_workbook(str(path), data_only=True)
+    wb = load_workbook(str(path), data_only=True, read_only=True)
     parts: list[str] = []
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
-        rows = list(ws.iter_rows(values_only=True))
+        if max_rows and max_rows > 0:
+            rows = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i >= max_rows:
+                    break
+                rows.append(row)
+        else:
+            rows = list(ws.iter_rows(values_only=True))
         if not rows:
             continue
         header_idx = 0
@@ -389,7 +432,25 @@ def parse_xlsx(path: Path) -> str:
 
 # --- DOCX, TXT, MD ---
 
-def parse_docx(path: Path) -> list[dict] | str:
+def parse_docx(path: Path, max_paragraphs: int | None = None) -> list[dict] | str:
+    # Preview path: dùng python-docx trực tiếp, break sớm — bypass Docling
+    # để tiết kiệm thời gian (Docling convert toàn bộ docx, kể cả khi chỉ cần
+    # vài đoạn đầu cho metadata).
+    if max_paragraphs and max_paragraphs > 0:
+        try:
+            from docx import Document
+            doc = Document(str(path))
+            parts: list[str] = []
+            for para in doc.paragraphs:
+                if len(parts) >= max_paragraphs:
+                    break
+                text = para.text.strip()
+                if text:
+                    parts.append(text)
+            return "\n\n".join(parts)
+        except Exception:
+            logger.exception("python-docx preview failed for %s", path.name)
+            return ""
     pages = _parse_with_docling(path)
     if pages:
         return pages
@@ -413,7 +474,27 @@ def parse_docx(path: Path) -> list[dict] | str:
         return ""
 
 
-def parse_pptx(path: Path) -> list[dict] | str:
+def parse_pptx(path: Path, max_slides: int | None = None) -> list[dict] | str:
+    # Preview path: chỉ N slide đầu, dùng python-pptx trực tiếp — bypass Docling
+    if max_slides and max_slides > 0:
+        try:
+            from pptx import Presentation
+            prs = Presentation(str(path))
+            result: list[dict] = []
+            for i, slide in enumerate(prs.slides, 1):
+                if i > max_slides:
+                    break
+                texts = [
+                    shape.text.strip()
+                    for shape in slide.shapes
+                    if hasattr(shape, "text") and shape.text.strip()
+                ]
+                if texts:
+                    result.append({"page": i, "text": "\n".join(texts)})
+            return result or ""
+        except Exception:
+            logger.exception("python-pptx preview failed for %s", path.name)
+            return ""
     pages = _parse_with_docling(path)
     if pages:
         return pages
@@ -435,7 +516,20 @@ def parse_pptx(path: Path) -> list[dict] | str:
         return ""
 
 
-def parse_txt(path: Path) -> str:
+def parse_txt(path: Path, max_bytes: int | None = None) -> str:
+    if max_bytes and max_bytes > 0:
+        try:
+            with path.open("rb") as f:
+                raw = f.read(max_bytes)
+            for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+                try:
+                    return raw.decode(encoding)
+                except UnicodeDecodeError:
+                    continue
+            return raw.decode("utf-8", errors="replace")
+        except Exception:
+            logger.exception("parse_txt preview failed for %s", path.name)
+            return ""
     for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
         try:
             return path.read_text(encoding=encoding)
@@ -444,13 +538,25 @@ def parse_txt(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def parse_md(path: Path) -> str:
-    return parse_txt(path)
+def parse_md(path: Path, max_bytes: int | None = None) -> str:
+    return parse_txt(path, max_bytes=max_bytes)
 
 
 # --- Main entry ---
 
-def parse(path: Union[str, Path]) -> dict:
+# Heuristics cho preview: 1 "page" tương đương ~5 paragraph DOCX, ~50 row XLSX,
+# ~10KB TXT/MD. Mục đích: parse đủ context cho Haiku gen metadata, không hơn.
+_PREVIEW_DOCX_PARAS_PER_PAGE = 5
+_PREVIEW_XLSX_ROWS_PER_PAGE = 50
+_PREVIEW_TXT_BYTES_PER_PAGE = 10240
+
+
+def parse(path: Union[str, Path], max_pages: int | None = None) -> dict:
+    """Parse file → dict {doc_id, source, content, mime, uploaded_at}.
+
+    Khi `max_pages` set, mỗi parser chỉ đọc đoạn đầu — dùng cho preview metadata.
+    Khi None (mặc định), parse đầy đủ — dùng cho ingest thật vào Qdrant.
+    """
     path = Path(path)
     if not path.exists():
         logger.error("File not found: %s", path)
@@ -466,22 +572,34 @@ def parse(path: Union[str, Path]) -> dict:
     uploaded_at = datetime.now(timezone.utc).isoformat()
 
     if suffix == ".pdf":
-        content = parse_pdf(path)
+        content = parse_pdf(path, max_pages=max_pages)
         mime = "application/pdf"
     elif suffix in (".docx", ".doc"):
-        content = parse_docx(path)
+        content = parse_docx(
+            path,
+            max_paragraphs=(max_pages * _PREVIEW_DOCX_PARAS_PER_PAGE) if max_pages else None,
+        )
         mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     elif suffix in (".pptx", ".ppt"):
-        content = parse_pptx(path)
+        content = parse_pptx(path, max_slides=max_pages)
         mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     elif suffix == ".xlsx":
-        content = parse_xlsx(path)
+        content = parse_xlsx(
+            path,
+            max_rows=(max_pages * _PREVIEW_XLSX_ROWS_PER_PAGE) if max_pages else None,
+        )
         mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     elif suffix == ".md":
-        content = parse_md(path)
+        content = parse_md(
+            path,
+            max_bytes=(max_pages * _PREVIEW_TXT_BYTES_PER_PAGE) if max_pages else None,
+        )
         mime = "text/markdown"
     else:
-        content = parse_txt(path)
+        content = parse_txt(
+            path,
+            max_bytes=(max_pages * _PREVIEW_TXT_BYTES_PER_PAGE) if max_pages else None,
+        )
         mime = mimetypes.guess_type(path.name)[0] or "text/plain"
 
     return {"doc_id": doc_id, "source": path.name, "content": content,

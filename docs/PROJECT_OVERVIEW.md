@@ -6,14 +6,15 @@
 
 Tính năng chính:
 
-1. **Nạp tài liệu** đa định dạng (PDF, DOCX, XLSX, TXT, MD) qua pipeline 3 tier.
-2. **Nạp video** (YouTube URL, YouTube Playlist, file MP4/MKV/AVI/MOV) — phiên âm + embed theo timestamp.
-3. **AI auto-metadata** khi upload: tự sinh `title`, `description`, `domain`, `tags` — Haiku tool use + Pydantic schema, FE prefill form để user review.
-4. **Hỏi đáp chuyên gia** theo 10 domain (BIM, MEP, marketing, pháp lý, sản xuất, công nghệ thông tin, nhân sự, tài chính, kinh doanh, thiết kế) hoặc **chat chung** (không chọn domain — fanout 20 collection).
-5. **Streaming SSE** — token-by-token qua `POST /api/chat/stream` (fallback JSON tại `POST /api/chat/`).
-6. **Gợi ý câu hỏi tiếp theo** tự động sau mỗi câu trả lời.
-7. **Hybrid memory 3 tầng** — sliding window + rolling summary (cùng session) + vector recall cross-session theo user.
-8. **Prompt caching 2 breakpoint** — cache persona+rules (system) và lịch sử hội thoại (messages) để cắt ~90% cost+latency ở turn thứ 2 trở đi.
+1. **Nạp tài liệu** đa định dạng (PDF, DOCX, PPTX, XLSX, TXT, MD) qua pipeline 3 tier.
+2. **Nạp video** (YouTube URL, YouTube Playlist, file MP4/MKV/AVI/MOV/WebM/FLV/WMV) — phiên âm + embed theo timestamp.
+3. **Async ingest + batch upload** — endpoint `*/async` trả `job_id` ngay, worker pool xử lý nền; endpoint `/files` upload nhiều file 1 request; `/from-urls` nhận list URL có Bearer token (cho BE đẩy file từ S3/SharePoint sau này). Polling tiến độ qua `GET /jobs/{id}` và `/batches/{id}`. Streaming upload 1MB/chunk → file 5GB không OOM.
+4. **AI auto-metadata** khi upload: tự sinh `title`, `description`, `domain`, `tags` — Haiku tool use + Pydantic schema, FE prefill form để user review. Preview cắt 5 trang đầu / 3 phút đầu video → file 422 trang preview ~13s thay vì ~10 phút Docling full.
+5. **Hỏi đáp chuyên gia** theo 10 domain (BIM, MEP, marketing, pháp lý, sản xuất, công nghệ thông tin, nhân sự, tài chính, kinh doanh, thiết kế) hoặc **chat chung** (không chọn domain — fanout 20 collection).
+6. **Streaming SSE** — token-by-token qua `POST /api/chat/stream` (fallback JSON tại `POST /api/chat/`).
+7. **Gợi ý câu hỏi tiếp theo** tự động sau mỗi câu trả lời.
+8. **Hybrid memory 3 tầng** — sliding window + rolling summary (cùng session) + vector recall cross-session theo user.
+9. **Prompt caching 2 breakpoint** — cache persona+rules (system) và lịch sử hội thoại (messages) để cắt ~90% cost+latency ở turn thứ 2 trở đi.
 
 Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5** (Vision + describe table + query rewrite + metadata gen), **Voyage AI** (`voyage-3`, 1024-dim) cho embedding, **Qdrant Cloud** làm vector store.
 
@@ -270,6 +271,138 @@ YouTube URL / Playlist URL / File MP4
 
 Playlist: lấy danh sách video → ingest tuần tự → trả về tổng hợp
 `total_videos / success_count / total_chunks`.
+
+---
+
+## Async Ingest & Batch Upload
+
+Endpoint sync `/file` `/video/file` `/youtube` (giữ nguyên — không phá tương thích) phù hợp cho file nhỏ. Với file lớn (>100MB) HTTP request giữ kết nối 5-15 phút → browser timeout, retry, OOM. Phase này thêm nhánh **async + batch + streaming**.
+
+### Sơ đồ
+
+```
+                ┌─────────────────────────────────────────┐
+                │  Endpoint cũ (sync, giữ tương thích)    │
+                │  /file, /video/file, /youtube           │
+                │  → đợi parse xong mới response          │
+                └─────────────────────────────────────────┘
+
+                ┌─────────────────────────────────────────┐
+                │  Endpoint mới (async)                   │
+                │  /file/async                            │
+                │  /video/file/async                      │
+                │  /youtube/async                         │
+                │  /files            ← multipart array    │
+                │  /from-urls        ← list URL + headers │
+                └────────────────┬────────────────────────┘
+                                 │ stream-to-disk (1MB/chunk)
+                                 │ create JobStatus → InMemoryJobStore
+                                 │ submit asyncio.Queue
+                                 ▼ (return job_id ngay <2s)
+                ┌─────────────────────────────────────────┐
+                │  JobRunner (asyncio queue)              │
+                │  N workers song song (default 2)        │
+                │   ├─ download nếu là /from-urls         │
+                │   │     (httpx.stream + size guard)     │
+                │   ├─ to_thread(ingest_document)         │
+                │   ├─ to_thread(ingest_video_file)       │
+                │   └─ to_thread(ingest_youtube)          │
+                │  → cập nhật JobStatus: parsing→done     │
+                └─────────────────────────────────────────┘
+                                 │
+                                 ▼
+                ┌─────────────────────────────────────────┐
+                │  GET /jobs/{job_id}                     │
+                │  GET /batches/{batch_id}                │
+                │  → poll trạng thái real-time            │
+                │  TTL 1h tự dọn job đã terminal          │
+                └─────────────────────────────────────────┘
+```
+
+### 5 endpoint mới
+
+| Endpoint | Mô tả | Khi nào dùng |
+|----------|-------|--------------|
+| `POST /api/ingest/file/async` | 1 file doc, trả `job_id` ngay | File >100MB / Docling parse lâu |
+| `POST /api/ingest/video/file/async` | 1 file video | Video >50MB / Whisper chậm |
+| `POST /api/ingest/youtube/async` | URL YouTube đơn / playlist | Tránh giữ HTTP suốt playlist 30 video |
+| `POST /api/ingest/files` | Batch multipart (max 50 file/req) | User chọn nhiều file 1 lần ở FE |
+| `POST /api/ingest/from-urls` | Batch JSON `[{download_url, filename, headers, metadata}]` | BE đã upload S3 → đẩy URL sang AI; SharePoint/Graph download URL có Bearer token |
+| `GET /api/ingest/jobs/{id}` | Trạng thái 1 job | Poll mỗi 2-5s |
+| `GET /api/ingest/batches/{id}` | Tổng hợp batch | UI progress bar tổng |
+
+### Streaming upload — chống OOM
+
+`app/api/ingest.py::_stream_to_disk` đọc UploadFile theo chunk `UPLOAD_STREAM_CHUNK` (1MB), ghi xuống tmp file, tính sha256 cùng lúc. Reject sớm nếu vượt `MAX_UPLOAD_MB` (5GB default). Sau khi có hash → rename thành tên persistent `{hash8}_{safe_name}.{ext}` trong `data/uploads/`. Trước fix này, `await file.read()` load cả file vào RAM → file 1GB chiếm 1GB RAM Python overhead × N concurrent uploads.
+
+### JobStore — in-memory tracking
+
+`app/core/job_store.py::InMemoryJobStore`:
+
+```python
+JobStatus(
+  job_id, job_type, filename,
+  status: queued | downloading | parsing | embedding | done | failed,
+  progress: 0..1,
+  chunks_added, pages, error,
+  batch_id, created_at, started_at, finished_at, metadata,
+)
+```
+
+- Dict trong RAM, có `asyncio.Lock`.
+- TTL `INGEST_JOB_TTL_SEC=3600` — job terminal quá 1h tự dọn (loop 5 phút/lần).
+- Restart process mất hết job đang chạy — chấp nhận được vì BE/FE sẽ retry. Khi BE chuyển sang RabbitMQ, swap class này bằng `RedisJobStore` cùng interface.
+
+### JobRunner — asyncio queue + worker pool
+
+`app/core/job_runner.py::JobRunner`:
+
+- N worker tasks (`INGEST_WORKER_CONCURRENCY=2` default) `await queue.get()` song song.
+- Pipeline ingest hiện tại là sync (Docling, Whisper, Voyage) → wrap qua `asyncio.to_thread()` để không block event loop.
+- Dispatch theo `job_type`:
+  - `document` → `ingest_document(file_path, original_name, metadata)`
+  - `video_file` → `ingest_video_file(local_path, original_name, metadata)`
+  - `youtube` → `ingest_youtube` hoặc `ingest_youtube_playlist`
+- Resolve file: `payload.file_path` (multipart đã lưu disk) HOẶC `payload.download_url` (httpx.stream chunked download với headers Bearer token).
+- Job-level fault isolation: 1 job fail không phá batch, không kill worker.
+
+### Batch tracking
+
+```python
+BatchSummary(
+  batch_id, total,
+  queued, in_progress, done, failed,
+  chunks_added,
+  jobs: [JobStatus.to_dict(), ...]
+)
+```
+
+- `batch_id` link mọi job trong cùng batch
+- `GET /batches/{id}` aggregate live từ JobStore — không cần ghi DB
+
+### Preview tối ưu — `max_pages` / `clip_duration_sec`
+
+| Định dạng | Cách lấy đoạn đầu | File 422 trang / 2h |
+|-----------|-------------------|---------------------|
+| PDF | `pypdf` cắt N trang đầu trước khi đưa Docling | ~13s thay vì ~10 phút |
+| DOCX | `python-docx` break sau `max_paragraphs` (5 × max_pages) | <2s |
+| PPTX | `python-pptx` `slides[:max_slides]` | <2s |
+| XLSX | `openpyxl read_only` cap rows (50 × max_pages) | <2s |
+| TXT/MD | Đọc N bytes đầu (10KB × max_pages) | <500ms |
+| Video | `ffmpeg -t {sec} -c copy` stream-copy clip → Whisper transcribe clip | ~20s thay vì 30 phút |
+
+Endpoint `/file/preview` dùng `parse(path, max_pages=PREVIEW_MAX_PAGES)` (mặc định 5). Endpoint `/video/file/preview` dùng `transcriber.transcribe(path, clip_duration_sec=PREVIEW_VIDEO_CLIP_SEC)` (mặc định 180s). Endpoint ingest thật **không** truyền các param này — parse full để có chunk đầy đủ vào Qdrant.
+
+### Lifecycle FastAPI
+
+`app/main.py::_lifespan` extend thêm 2 hook:
+
+- **Startup**: `await get_runner().start()` — tạo N worker task + cleanup loop
+- **Shutdown**: `await get_runner().stop()` — cancel + drain pending tasks
+
+### Khi BE có RabbitMQ queue (phase sau)
+
+Chỉ thay `JobRunner` bằng `aio_pika.Consumer` gọi cùng `_handle_document` / `_handle_video_file` / `_handle_youtube`. Pipeline `ingest_document` / `ingest_video_file` không phải sửa. Endpoint async hiện tại có thể giữ lại để FE/test thủ công không cần RabbitMQ.
 
 ---
 
@@ -621,8 +754,13 @@ trungtamtrithuc/
 │   ├── schemas.py               # ChatRequest/Response, Ingest, KnowledgeSearch
 │   ├── api/
 │   │   ├── chat.py              # POST /api/chat/ (JSON) + /api/chat/stream (SSE)
-│   │   └── ingest.py            # POST /api/ingest/{file,video/file,youtube,youtube-playlist}
-│   │                            #   + /…/preview cho file, video, youtube
+│   │   └── ingest.py            # SYNC: POST /api/ingest/{file,video/file,youtube,youtube-playlist}
+│   │                            #   + /…/preview (cắt N trang/N giây cho file lớn)
+│   │                            # ASYNC: /file/async, /video/file/async, /youtube/async
+│   │                            #   → trả job_id ngay, JobRunner xử lý nền
+│   │                            # BATCH: /files (multipart array), /from-urls (list URL+headers)
+│   │                            # POLL: GET /jobs/{id}, GET /batches/{id}
+│   │                            # Streaming upload 1MB/chunk (chống OOM với file >100MB)
 │   ├── core/
 │   │   ├── chunker.py           # Heading-aware chunking (tiktoken cl100k_base)
 │   │   ├── claude_client.py     # Anthropic messages client (sync + stream)
@@ -638,13 +776,22 @@ trungtamtrithuc/
 │   │   ├── conv_memory.py       # Vector recall Qdrant ttt_memory (cross-session)
 │   │   │                        #   + ensure_indexes, should_skip_recall, 4-layer guards
 │   │   ├── conv_summarizer.py   # Haiku summarize rolled turns
-│   │   └── conv_query_rewriter.py  # Haiku rewrite — anaphora-conditional
+│   │   ├── conv_query_rewriter.py  # Haiku rewrite — anaphora-conditional
+│   │   ├── job_store.py         # InMemoryJobStore + JobStatus + BatchSummary
+│   │   │                        #   (TTL cleanup, asyncio.Lock thread-safe)
+│   │   └── job_runner.py        # JobRunner: asyncio.Queue + N workers
+│   │                            #   dispatch document/video_file/youtube
+│   │                            #   httpx stream-download cho /from-urls
 │   ├── ingestion/
 │   │   ├── doc_parser.py        # 3-tier parser + typo fix
+│   │   │                        #   + parse(max_pages) — preview cắt N trang đầu
+│   │   │                        #   + _truncate_pdf (pypdf) cho PDF preview
 │   │   ├── doc_pipeline.py      # Table detect + LLM describe + Vision+context
 │   │   ├── metadata_generator.py   # Haiku tool use + Pydantic → title/desc/domain/tags
 │   │   ├── video_pipeline.py    # YouTube + local + playlist
 │   │   ├── video_transcriber.py # Groq (if key) > Whisper local
+│   │   │                        #   + transcribe(clip_duration_sec) — preview cắt N giây
+│   │   │                        #   + _clip_media (ffmpeg stream-copy ~1s)
 │   │   └── youtube_fetcher.py   # youtube-transcript-api + yt-dlp + proxy rotation
 │   └── rag/
 │       ├── chain.py             # Rewrite → embed-once → retrieve∥recall → rerank → guard → generate
@@ -717,6 +864,13 @@ cp .env.example .env
 | Conv | `CONV_MIN_USER_CHARS` | 20 | User msg < → skip upsert |
 | Conv | `CONV_MIN_BOT_CHARS` | 40 | Bot msg < (và không "Nguồn:") → skip |
 | Rerank | `RERANKER_DEVICE` | auto | `cpu` / `cuda` / `mps` |
+| Ingest | `MAX_UPLOAD_MB` | 5120 | Cap kích thước 1 file (MB). Vượt → reject 413. nginx phải set `client_max_body_size` khớp |
+| Ingest | `INGEST_WORKER_CONCURRENCY` | 2 | Số job xử lý song song. Tăng nếu RAM khoẻ (mỗi PPTX/Vision tốn 1-2GB) |
+| Ingest | `INGEST_MAX_BATCH_SIZE` | 50 | Cap số file/batch (multipart `/files` hoặc `/from-urls`) |
+| Ingest | `INGEST_JOB_TTL_SEC` | 3600 | Job terminal giữ trong RAM bao lâu trước khi dọn |
+| Ingest | `UPLOAD_STREAM_CHUNK` | 1048576 | Chunk size khi stream-to-disk (bytes, default 1MB) |
+| Preview | `PREVIEW_MAX_PAGES` | 5 | Số trang/slide đầu cho `/file/preview` |
+| Preview | `PREVIEW_VIDEO_CLIP_SEC` | 180 | Số giây đầu video cho `/video/file/preview` |
 
 ### Truy cập
 
@@ -761,6 +915,9 @@ cp .env.example .env
 | Vector DB | Qdrant Cloud (2 cluster: main + vmedia read-only) |
 | PDF parser | Docling (IBM) → Claude Vision → pdfplumber |
 | PDF → image | pdf2image + poppler |
+| PDF preview truncation | pypdf (cắt N trang đầu trước Docling) |
+| Async ingest queue | `asyncio.Queue` + N workers (default 2), `httpx.stream` cho `/from-urls` |
+| Job tracking | In-memory dict + `asyncio.Lock`, TTL cleanup 1h |
 | DOCX | Docling / python-docx |
 | XLSX | openpyxl |
 | Video transcribe | yt-dlp, youtube-transcript-api, Groq (nếu có key), Whisper local |
@@ -845,6 +1002,12 @@ Fallback JSON tại `POST /api/chat/` giữ nguyên contract cho client chưa h�
 - ~~**Qdrant collection per-domain**~~ ✅ 20 collection (`tdi_{docs,videos}_{slug}`) + registry route ingestion theo `metadata.domain`. Trước đây ingest vào `ttt_documents`/`ttt_videos` nhưng retriever tra `tdi_*_{domain}` → 0 hits cho mọi query. Upload form bắt buộc domain (1 trong 10), chat chung fanout 20 collection song song.
 - ~~**Slug alignment với NestJS**~~ ✅ Domain key đổi từ persona VN (`"thiết kế"`, `"công nghệ thông tin"`) sang slug ASCII (`"thiet_ke"`, `"cntt"`) khớp với `knowledge_center_backend/src/database/seeds/categories.seeder.ts`. `cong_nghe` → `cntt`. `DOMAIN_PERSONAS` keys, `DomainLiteral` enum, web/chat.html + web/ingest.html option values, `conv_memory` default domain đều chuyển slug. Legacy client gửi persona VN vẫn hoạt động qua `PERSONA_TO_DOMAIN` backward compat map.
 - ~~**Conv memory bootstrap**~~ ✅ `ensure_indexes()` giờ gọi `ensure_collection()` trước — tạo `ttt_memory` với unnamed vector 1024-dim Cosine nếu 404. Trước đây upsert đầu tiên trả 404 bị nuốt im lặng.
+- ~~**Async ingest + worker pool**~~ ✅ `app/core/job_runner.py` + `job_store.py`. Endpoint `*/async` + `/files` + `/from-urls` + `/jobs/{id}` + `/batches/{id}`. asyncio.Queue + N worker (default 2), wrap pipeline sync qua `asyncio.to_thread()`. Job-level fault isolation. Endpoint cũ giữ nguyên cho tương thích.
+- ~~**Streaming upload**~~ ✅ `_stream_to_disk` đọc 1MB/chunk, tính sha256 cùng lúc, reject sớm nếu vượt `MAX_UPLOAD_MB=5GB`. File 1GB không OOM (trước: `await file.read()` load cả file vào RAM × N concurrent uploads).
+- ~~**Batch upload**~~ ✅ `POST /files` (multipart array max 50 file) + `POST /from-urls` (JSON list URL+headers, runner tự `httpx.stream` download). Tự route doc/video theo suffix. Errors capture per-file, không phá batch.
+- ~~**Preview "đọc đoạn đầu"**~~ ✅ `parse(max_pages=5)` cắt PDF với pypdf trước Docling, DOCX/PPTX break sớm, XLSX limit row, TXT/MD đọc N bytes. `transcribe(clip_duration_sec=180)` ffmpeg stream-copy clip trước Whisper. File 422 trang preview ~13s thay vì ~10 phút.
+- **Persistent job store** — In-memory hiện tại mất job khi restart. Phase sau swap sang Redis (`RedisJobStore` cùng interface) hoặc RabbitMQ-backed khi BE ready. Pipeline + handler không phải sửa.
+- **Bigfile / SharePoint / PPTX 3-tier** — Phase tiếp theo: BE build Microsoft Graph integration (passport-azure-ad đã có) → publish RabbitMQ message → AI worker consume từ queue thay vì HTTP. PPTX nâng tier-2 LibreOffice→PDF→Vision per-slide.
 - **Auth thật** — hiện `user_id` là string tự do client truyền; tích hợp đăng nhập để verify + chống impersonate memory của user khác.
 - **User profile extract** — tách fact cá nhân (tên, team, ngân sách, preference) ra block riêng thay vì lẫn trong recall pairs — tăng độ bền trước khi recall score rơi dưới threshold.
 - **Admin CRUD knowledge** — delete/re-index tài liệu từ `knowledge.html`.
