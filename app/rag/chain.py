@@ -164,11 +164,24 @@ def _extract_urls(text: str) -> list[str]:
     return out
 
 
+def _normalize_url_for_match(url: str) -> str:
+    """Chuẩn hoá URL về form so sánh: bỏ protocol, query, fragment, trailing slash.
+
+    Cho phép Claude append timestamp/anchor (kiểu `?t=149s` cho S3 video,
+    `#section-2` cho doc) mà vẫn match URL gốc trong corpus.
+    """
+    bare = re.sub(r"^https?://", "", url, flags=re.IGNORECASE)
+    bare = bare.split("#", 1)[0].split("?", 1)[0]
+    return bare.rstrip("/")
+
+
 def _has_fabricated_url(answer: str, hits: list) -> tuple[bool, str]:
     """Detect URL trong answer KHÔNG xuất hiện trong bất kỳ hit text/payload nào.
 
     Đây là fast deterministic check (không gọi LLM) — catch case Claude bịa
-    URL kiểu `bkvn.tdigroup.vn` rất hiệu quả vì URL phải match exact substring.
+    URL kiểu `bkvn.tdigroup.vn`. So sánh chỉ trên path (bỏ query/fragment) để
+    Claude được phép thêm `?t=149s` timestamp vào S3 video URL hoặc `#section`
+    anchor vào doc URL mà không bị flag fabricated.
     """
     answer_urls = _extract_urls(answer)
     if not answer_urls:
@@ -183,8 +196,7 @@ def _has_fabricated_url(answer: str, hits: list) -> tuple[bool, str]:
                 corpus_parts.append(v)
     corpus = "\n".join(corpus_parts)
     for u in answer_urls:
-        # Strip protocol để match cả http/https variant
-        bare = re.sub(r"^https?://", "", u, flags=re.IGNORECASE).rstrip("/")
+        bare = _normalize_url_for_match(u)
         if bare and bare not in corpus:
             return True, u
     return False, ""

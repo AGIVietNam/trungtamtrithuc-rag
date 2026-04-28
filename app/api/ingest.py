@@ -1046,25 +1046,61 @@ async def preview_from_url(payload: FromUrlRequest = Body(...)) -> dict:
     except ValueError as exc:
         return {"status": "error", "message": str(exc), "metadata": None}
 
-    # YouTube + stream platforms → reuse logic preview_youtube_metadata (yt-dlp),
-    # rồi normalize về cùng shape với document preview (title/description/domain/tags)
-    # để FE chỉ cần 1 contract cho /from-url/preview.
+    # YouTube + stream platforms: fast preview path — yt-dlp metadata + AI classify
+    # từ title/description/yt_categories/yt_tags. KHÔNG fetch transcript (chậm + hay
+    # fail) để bám timeout FE 20s. Trả cùng shape {title, description, domain, tags}.
     if resolved.kind == "youtube":
-        yt_resp = await preview_youtube_metadata(resolved.download_url)
-        if yt_resp.get("status") != "ok" or not yt_resp.get("metadata"):
-            return yt_resp
-        ym = yt_resp["metadata"]
-        if ym.get("is_playlist"):
-            # Playlist giữ nguyên shape (FE cần video_count, playlist_title, ...)
-            return yt_resp
+        clean_url = resolved.download_url.strip()
+        if _is_playlist_url(clean_url):
+            # Playlist giữ nguyên shape cũ (FE cần video_count, playlist_title, ...)
+            return await preview_youtube_metadata(clean_url)
+
+        t0 = time.perf_counter()
+        try:
+            from app.ingestion.youtube_fetcher import fetch_youtube_metadata
+            yt = fetch_youtube_metadata(clean_url)
+        except Exception as exc:
+            logger.warning("yt-dlp metadata fail cho %s: %s", clean_url, exc)
+            return {
+                "status": "error",
+                "message": f"Không lấy được metadata YouTube: {exc}",
+                "metadata": None,
+            }
+        t_ytdlp = time.perf_counter()
+
+        ai_parts: list[str] = []
+        if yt.get("title"):
+            ai_parts.append(f"Tiêu đề YouTube: {yt['title']}")
+        if yt.get("description"):
+            ai_parts.append(f"Mô tả YouTube: {yt['description'][:1500]}")
+        if yt.get("categories"):
+            ai_parts.append(f"YouTube categories: {', '.join(yt['categories'])}")
+        if yt.get("yt_tags"):
+            ai_parts.append(f"YouTube tags: {', '.join(yt['yt_tags'][:20])}")
+        ai_input = "\n\n".join(ai_parts)
+
+        ai_meta = generate_document_metadata(
+            text_sample=ai_input,
+            filename=yt.get("title") or "youtube-video",
+        )
+        t_ai = time.perf_counter()
+        logger.info(
+            "POST /from-url/preview YT fast (%s): ytdlp=%.2fs ai=%.2fs total=%.2fs (ai_ok=%s)",
+            clean_url, t_ytdlp - t0, t_ai - t_ytdlp, t_ai - t0, ai_meta is not None,
+        )
+
         return {
             "status": "ok",
-            "message": yt_resp.get("message", "Metadata đã gen từ URL."),
+            "message": (
+                "Lấy metadata YouTube + AI classify thành công."
+                if ai_meta else
+                "Đã lấy metadata YouTube, AI classify thất bại."
+            ),
             "metadata": {
-                "title": ym.get("title", ""),
-                "description": ym.get("description", ""),
-                "domain": ym.get("domain", ""),
-                "tags": ym.get("tags") or [],
+                "title": yt.get("title", ""),
+                "description": (yt.get("description") or "")[:800].strip(),
+                "domain": ai_meta.domain if ai_meta else "",
+                "tags": ai_meta.tags if ai_meta else [],
             },
         }
 
