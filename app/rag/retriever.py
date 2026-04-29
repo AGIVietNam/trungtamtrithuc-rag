@@ -64,11 +64,18 @@ class Retriever:
         domain: str | None = None,          # slug: "bim", "cong-nghe", None=chat chung
         sources: list[str] | None = None,
         query_vec: list[float] | None = None,
+        doc_id: str | None = None,          # Hạn chế chỉ chunks của 1 doc (E2E test)
     ) -> list[Hit]:
         if sources is None:
             sources = ["documents", "videos"]
         if query_vec is None:
             query_vec = self.voyage.embed_query(query)
+
+        # Filter Qdrant payload — hiện chỉ hỗ trợ doc_id, mở rộng dễ về sau.
+        # Áp dụng cho doc/video stores, KHÔNG áp dụng vmedia (collection ngoài).
+        doc_filter: dict | None = None
+        if doc_id:
+            doc_filter = {"must": [{"key": "doc_id", "match": {"value": doc_id}}]}
 
         # ── Chọn stores theo domain ──────────────────────────────────────────
         if domain:
@@ -87,10 +94,13 @@ class Retriever:
         # ── Build tasks ──
         tasks: list[tuple] = []
         for store in doc_stores:
-            tasks.append((store, "document", query_vec, top_k, None))
+            tasks.append((store, "document", query_vec, top_k, doc_filter))
         for store in vid_stores:
-            tasks.append((store, "video", query_vec, top_k, None))
+            tasks.append((store, "video", query_vec, top_k, doc_filter))
         if "vmedia" in sources and self.vmedia_store.api_key:
+            # vmedia là collection ngoài (Vietteltel media), không có doc_id
+            # của hệ thống ta — bỏ qua filter để tránh search trả 0 hit khi
+            # doc_id_filter set.
             tasks.append((self.vmedia_store, "vmedia", query_vec, top_k, None))
 
         # ── Search song song ─────────────────────────────────────────────────

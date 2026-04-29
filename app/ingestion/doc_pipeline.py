@@ -297,14 +297,17 @@ def ingest_document(
 
     # Flatten pages — kéo theo images metadata per page (PDF/parser mới trả về).
     # Page chỉ có ảnh không text vẫn được giữ lại để ảnh không "biến mất".
+    # `sheet_name` chỉ XLSX có (parse_xlsx set), PDF/DOCX là "" → display logic
+    # ở payload chỉ thêm field này khi non-empty.
     if isinstance(content, list):
-        page_data: list[tuple[int, str, list[dict]]] = [
-            (item["page"], item["text"], item.get("images", []) or [])
+        page_data: list[tuple[int, str, list[dict], str]] = [
+            (item["page"], item["text"], item.get("images", []) or [],
+             item.get("sheet_name", "") or "")
             for item in content
             if item["text"].strip() or item.get("images")
         ]
     else:
-        page_data = [(1, content, [])]
+        page_data = [(1, content, [], "")]
 
     num_pages = len(page_data)
     embedder = VoyageEmbedder(api_key=config.VOYAGE_API_KEY, model=config.VOYAGE_MODEL)
@@ -312,7 +315,7 @@ def ingest_document(
     all_points: list[dict] = []
     chunk_index = 0
 
-    for page_num, text, page_images in page_data:
+    for page_num, text, page_images, sheet_name in page_data:
         embed_text, table_data, needs_vision = _process_content(text)
 
         # Vision with context for tables with empty cells (colors)
@@ -338,10 +341,11 @@ def ingest_document(
 
         # Slim images payload — duplicate vào MỌI chunk của trang để recall không
         # phụ thuộc chunk #1 phải win score (caption có khi nằm cuối embed_text).
+        # `url` = full public URL S3, FE load thẳng. Không có local filename nữa.
         images_payload = [
             {
                 "image_id": img["image_id"],
-                "filename": img["filename"],
+                "url": img.get("url", ""),
                 "caption": img.get("caption", ""),
                 "page": img.get("page", page_num),
                 "ord": img.get("ord", 0),
@@ -349,6 +353,7 @@ def ingest_document(
                 "height": img.get("height", 0),
             }
             for img in page_images
+            if img.get("url")  # Bỏ ảnh upload S3 fail (url rỗng) khỏi payload
         ]
 
         for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
@@ -363,6 +368,8 @@ def ingest_document(
                 "heading_path": chunk.heading_path,
                 "uploaded_at": uploaded_at,
             }
+            if sheet_name:
+                payload["sheet_name"] = sheet_name
             if table_data and i == 0:
                 payload["table_data"] = table_data
             if images_payload:
@@ -397,28 +404,30 @@ def ingest_document(
     # chunk_type="image_caption" cho debug và để team có thể tune sau (vd
     # boost/penalty score) ở reranker mà không phải re-ingest.
     seen_image_ids: set[str] = set()
-    synthetic_units: list[tuple[dict, str]] = []  # (image_meta, caption)
-    for page_num, _, page_images in page_data:
+    synthetic_units: list[tuple[dict, str, str]] = []  # (image_meta, caption, sheet_name)
+    for page_num, _, page_images, sheet_name in page_data:
         for img in page_images:
             image_id = img["image_id"]
             caption = (img.get("caption") or "").strip()
-            if not caption or image_id in seen_image_ids:
+            # Skip nếu thiếu caption hoặc URL S3 (upload fail) — synthetic chunk
+            # không có URL thì FE không hiển thị được.
+            if not caption or not img.get("url") or image_id in seen_image_ids:
                 continue
             seen_image_ids.add(image_id)
             synthetic_units.append(
-                ({**img, "page": img.get("page", page_num)}, caption)
+                ({**img, "page": img.get("page", page_num)}, caption, sheet_name)
             )
 
     if synthetic_units:
-        captions = [c for _, c in synthetic_units]
+        captions = [c for _, c, _ in synthetic_units]
         # 1 batch embed cho tất cả captions — Voyage chấp nhận multi-input.
         caption_vectors = embedder.embed_documents(captions)
 
-        for (img, caption), vector in zip(synthetic_units, caption_vectors):
+        for (img, caption, sheet_name), vector in zip(synthetic_units, caption_vectors):
             point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}-{chunk_index}"))
             slim_image = {
                 "image_id": img["image_id"],
-                "filename": img["filename"],
+                "url": img.get("url", ""),
                 "caption": caption,
                 "page": img["page"],
                 "ord": img.get("ord", 0),
@@ -437,6 +446,8 @@ def ingest_document(
                 "uploaded_at": uploaded_at,
                 "images": [slim_image],
             }
+            if sheet_name:
+                payload["sheet_name"] = sheet_name
             if metadata:
                 if metadata.get("domain"):
                     payload["domain"] = metadata["domain"]
