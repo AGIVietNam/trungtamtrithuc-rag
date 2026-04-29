@@ -929,6 +929,19 @@ export HYBRID_RETRIEVAL=0
 export CONTEXTUAL_CHUNKING=0
 ```
 
+### Phạm vi áp dụng — ttt_memory KHÔNG đổi
+
+Hybrid chỉ áp dụng cho 20 collection `tdi_{docs,videos}_{slug}`. Collection
+`ttt_memory` (conversation pair recall — `app/core/conv_memory.py`) GIỮ NGUYÊN
+schema `Default 1024 Cosine` (single dense unnamed vector) vì:
+
+- Self-managed: `conv_memory.py` không đi qua `QdrantStore` đã refactor.
+- Use case khác: tìm hội thoại tương tự, không phải fact lookup → BM25 không cần thiết.
+- Đã có rerank threshold cao 0.75 lọc noise.
+- Contextual chunking trên conversation pair là dư thừa + tốn cost.
+
+→ Không cần chạy migration cho `ttt_memory`. `reset_qdrant_collections.py` cũng KHÔNG đụng vào collection này.
+
 ---
 
 ## Conversation Memory (Hybrid 3 tầng)
