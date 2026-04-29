@@ -919,6 +919,95 @@ def parse_xlsx(
 
 # --- DOCX, TXT, MD ---
 
+# --- Legacy .doc → .docx conversion via LibreOffice headless ---
+
+# 60s đủ cho file vài chục MB; vượt timeout coi như fail và trả về None để
+# caller fallback sang flow lỗi (preview trả status="partial" thay vì hang gateway).
+_DOC_CONVERT_TIMEOUT_SEC = 60
+
+
+def _find_soffice() -> str | None:
+    """Locate LibreOffice binary cross-platform. None nếu không cài."""
+    import shutil
+
+    for name in ("soffice", "libreoffice"):
+        found = shutil.which(name)
+        if found:
+            return found
+    fallbacks = (
+        "/usr/bin/soffice",
+        "/usr/bin/libreoffice",
+        "/usr/lib/libreoffice/program/soffice",
+        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+    )
+    for candidate in fallbacks:
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+def _convert_doc_to_docx(src: Path) -> Path | None:
+    """Convert legacy `.doc` (binary OLE) → `.docx` qua LibreOffice headless.
+
+    Trả về Path file `.docx` mới (caller phải `unlink` sau khi dùng), hoặc
+    None nếu LibreOffice chưa cài / convert fail / timeout.
+    """
+    soffice = _find_soffice()
+    if not soffice:
+        logger.error(
+            "Không parse được .doc: LibreOffice chưa cài. "
+            "Cần `apt-get install libreoffice` hoặc user save lại file thành .docx."
+        )
+        return None
+
+    import subprocess
+    import tempfile
+
+    out_dir = Path(tempfile.mkdtemp(prefix="doc2docx_"))
+    try:
+        result = subprocess.run(
+            [
+                soffice, "--headless", "--convert-to", "docx",
+                "--outdir", str(out_dir), str(src),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_DOC_CONVERT_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "soffice timeout (>%ds) khi convert .doc: %s",
+            _DOC_CONVERT_TIMEOUT_SEC, src.name,
+        )
+        return None
+    except Exception:
+        logger.exception("soffice subprocess failed for %s", src.name)
+        return None
+
+    if result.returncode != 0:
+        logger.error(
+            "soffice exit %d cho %s: %s",
+            result.returncode, src.name, (result.stderr or "").strip(),
+        )
+        return None
+
+    converted = out_dir / f"{src.stem}.docx"
+    if not converted.exists():
+        candidates = list(out_dir.glob("*.docx"))
+        if not candidates:
+            logger.error("soffice không sinh ra .docx cho %s", src.name)
+            return None
+        converted = candidates[0]
+
+    logger.info(
+        "Convert .doc → .docx: %s → %s (%d bytes)",
+        src.name, converted.name, converted.stat().st_size,
+    )
+    return converted
+
+
 def parse_docx(
     path: Path,
     doc_id: str = "",
@@ -1096,11 +1185,30 @@ def parse(path: Union[str, Path], max_pages: int | None = None) -> dict:
         content = parse_pdf(path, doc_id=doc_id, max_pages=max_pages)
         mime = "application/pdf"
     elif suffix in (".docx", ".doc"):
-        content = parse_docx(
-            path,
-            doc_id=doc_id,
-            max_paragraphs=(max_pages * _PREVIEW_DOCX_PARAS_PER_PAGE) if max_pages else None,
-        )
+        # python-docx chỉ đọc được .docx (zip+xml). .doc là OLE binary cũ —
+        # phải convert qua LibreOffice headless trước.
+        docx_target: Path | None = path
+        converted: Path | None = None
+        if suffix == ".doc":
+            converted = _convert_doc_to_docx(path)
+            docx_target = converted
+        try:
+            if docx_target is None:
+                content = ""
+            else:
+                content = parse_docx(
+                    docx_target,
+                    doc_id=doc_id,
+                    max_paragraphs=(max_pages * _PREVIEW_DOCX_PARAS_PER_PAGE) if max_pages else None,
+                )
+        finally:
+            if converted is not None:
+                converted.unlink(missing_ok=True)
+                # cleanup tempdir do _convert_doc_to_docx tạo
+                try:
+                    converted.parent.rmdir()
+                except OSError:
+                    pass
         mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     elif suffix in (".pptx", ".ppt"):
         content = parse_pptx(path, max_slides=max_pages)

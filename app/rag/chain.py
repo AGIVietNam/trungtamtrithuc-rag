@@ -23,7 +23,7 @@ from app.rag.reranker import CrossEncoderReranker
 from app.rag.prompt_builder import (
     build_system_prompt,
     build_documents_blocks,
-    build_sources_mapping,
+    build_sources_from_citations,
     build_conversation_block,
     build_user_content,
 )
@@ -283,17 +283,14 @@ def _build_sources_from_citations(
     Vì ``build_user_content()`` đặt N doc blocks ở vị trí 0..N-1 và 1 text
     block cuối, doc_index 0..N-1 map trực tiếp sang hits[0..N-1].
 
+    Excerpt của mỗi position lấy từ ``cited_text`` của citation tương ứng,
+    KHÔNG cắt từ chunk — đảm bảo FE hiển thị đúng câu Claude đã trích.
+
     Nếu không có citation → trả [] (caller sẽ refuse hoặc không show source).
     """
-    cited_indices: set[int] = set()
-    for c in citations:
-        idx = c.get("doc_index")
-        if isinstance(idx, int) and 0 <= idx < len(hits):
-            cited_indices.add(idx)
-    if not cited_indices:
+    if not citations:
         return []
-    cited_hits = [hits[i] for i in sorted(cited_indices)]
-    return build_sources_mapping(cited_hits)
+    return build_sources_from_citations(hits, citations)
 
 
 def _top_score(hits: list) -> float:

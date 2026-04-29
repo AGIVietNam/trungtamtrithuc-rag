@@ -81,6 +81,7 @@ class JobStatusResponse(BaseModel):
     pages: int
     error: str | None = None
     batch_id: str | None = None
+    document_id: str | None = None  # BE document.id để correlate với webhook callback
     created_at: float
     started_at: float | None = None
     finished_at: float | None = None
@@ -112,6 +113,8 @@ class FromUrlsItem(BaseModel):
     `metadata.domain` BẮT BUỘC (1 trong 10 slug) để route Qdrant đúng collection.
     `headers` để truyền Bearer token cho SharePoint/Graph download URL.
     `callback_url` để AI POST status khi job done/failed (xem JobCallbackPayload).
+    `document_id` (BE document.id) — AI giữ + bắn lại trong webhook BE
+    (`/api/v1/webhooks/document`) khi embed xong / fail. Trống → bỏ qua webhook.
     """
     download_url: str
     filename: str
@@ -119,6 +122,7 @@ class FromUrlsItem(BaseModel):
     headers: dict[str, str] | None = None
     size_bytes: int | None = None
     callback_url: str | None = None
+    document_id: str | None = None
 
 
 class FromUrlsRequest(BaseModel):
@@ -135,6 +139,7 @@ class FromUrlRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     headers: dict[str, str] | None = None
     callback_url: str | None = None  # AI POST khi job done/failed
+    document_id: str | None = None   # BE document.id — AI bắn lại qua webhook BE
 
 
 class JobCallbackPayload(BaseModel):
@@ -151,4 +156,5 @@ class JobCallbackPayload(BaseModel):
     pages: int
     error: str | None
     duration_sec: float
+    document_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

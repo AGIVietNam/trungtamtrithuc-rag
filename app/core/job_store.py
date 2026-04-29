@@ -36,6 +36,7 @@ class JobStatus:
     pages: int = 0
     error: str | None = None
     batch_id: str | None = None
+    document_id: str | None = None  # BE document.id — bắn lại qua webhook BE
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     finished_at: float | None = None
@@ -92,12 +93,14 @@ class InMemoryJobStore:
         filename: str,
         batch_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        document_id: str | None = None,
     ) -> JobStatus:
         job = JobStatus(
             job_id=str(uuid.uuid4()),
             job_type=job_type,
             filename=filename,
             batch_id=batch_id,
+            document_id=document_id,
             metadata=metadata or {},
         )
         async with self._lock:

@@ -4,6 +4,8 @@ import concurrent.futures
 from dataclasses import dataclass, field
 from typing import Any
 
+from app import config
+from app.core import sparse_encoder
 from app.core.voyage_embed import VoyageEmbedder
 from app.core.qdrant_store import QdrantStore, VMediaReadOnlyStore, QdrantRegistry
 
@@ -35,11 +37,20 @@ class Retriever:
         query_vec: list[float],
         top_k: int,
         qdrant_filter: dict | None = None,
+        sparse_vec: dict | None = None,
     ) -> list[Hit]:
         col = getattr(store, "collection", "vmedia")
         try:
-            hits = store.search(query_vec, limit=top_k, filter=qdrant_filter)
-            print(f"retriever _search_one {col}/{source_type}: {len(hits)} hits (filter={bool(qdrant_filter)})")
+            hits = store.search(
+                query_vec,
+                limit=top_k,
+                filter=qdrant_filter,
+                sparse_vector=sparse_vec,
+            )
+            print(
+                f"retriever _search_one {col}/{source_type}: {len(hits)} hits "
+                f"(filter={bool(qdrant_filter)}, sparse={bool(sparse_vec and sparse_vec.get('indices'))})"
+            )
             return [
                 Hit(
                     text=h.get("payload", {}).get("text", ""),
@@ -64,12 +75,17 @@ class Retriever:
         domain: str | None = None,          # slug: "bim", "cong-nghe", None=chat chung
         sources: list[str] | None = None,
         query_vec: list[float] | None = None,
+        sparse_vec: dict | None = None,
         doc_id: str | None = None,          # Hạn chế chỉ chunks của 1 doc (E2E test)
     ) -> list[Hit]:
         if sources is None:
             sources = ["documents", "videos"]
         if query_vec is None:
             query_vec = self.voyage.embed_query(query)
+        # Sparse query encode lazy — chỉ khi hybrid bật và caller chưa pass.
+        # Encode local (~5-20ms) nên hợp lệ trong synchronous path.
+        if sparse_vec is None and config.HYBRID_RETRIEVAL:
+            sparse_vec = sparse_encoder.encode(query)
 
         # Filter Qdrant payload — hiện chỉ hỗ trợ doc_id, mở rộng dễ về sau.
         # Áp dụng cho doc/video stores, KHÔNG áp dụng vmedia (collection ngoài).
@@ -92,16 +108,18 @@ class Retriever:
             vid_stores  = self.registry.all_videos_stores() if "videos"    in sources else []
 
         # ── Build tasks ──
+        # Sparse vec only attaches to TDI hybrid stores (docs + videos), KHÔNG
+        # pass cho vmedia (cluster ngoài, single-vector legacy schema).
         tasks: list[tuple] = []
         for store in doc_stores:
-            tasks.append((store, "document", query_vec, top_k, doc_filter))
+            tasks.append((store, "document", query_vec, top_k, doc_filter, sparse_vec))
         for store in vid_stores:
-            tasks.append((store, "video", query_vec, top_k, doc_filter))
+            tasks.append((store, "video", query_vec, top_k, doc_filter, sparse_vec))
         if "vmedia" in sources and self.vmedia_store.api_key:
-            # vmedia là collection ngoài (Vietteltel media), không có doc_id
-            # của hệ thống ta — bỏ qua filter để tránh search trả 0 hit khi
-            # doc_id_filter set.
-            tasks.append((self.vmedia_store, "vmedia", query_vec, top_k, None))
+            # vmedia là collection ngoài (Viettel media), không có doc_id
+            # của hệ thống ta + không hỗ trợ sparse — bỏ cả 2 filter để tránh
+            # search trả 0 hit.
+            tasks.append((self.vmedia_store, "vmedia", query_vec, top_k, None, None))
 
         # ── Search song song ─────────────────────────────────────────────────
         all_hits: list[Hit] = []
@@ -122,5 +140,9 @@ class Retriever:
 
         result = deduped[:top_k]
         top_score = result[0].score if result else 0.0
-        print(f"retrieve: domain={domain!r} tasks={len(tasks)} raw={len(all_hits)} deduped={len(deduped)} returned={len(result)} top_score={top_score:.4f}")
+        print(
+            f"retrieve: domain={domain!r} tasks={len(tasks)} raw={len(all_hits)} "
+            f"deduped={len(deduped)} returned={len(result)} top_score={top_score:.4f} "
+            f"hybrid={bool(sparse_vec and sparse_vec.get('indices'))}"
+        )
         return result

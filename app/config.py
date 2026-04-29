@@ -41,6 +41,21 @@ CHUNK_OVERLAP_TOKENS: int = int(os.getenv("CHUNK_OVERLAP_TOKENS", "80"))
 TOP_K: int = int(os.getenv("TOP_K", "7"))
 RERANK_TOP_K: int = int(os.getenv("RERANK_TOP_K", "5"))
 
+# Hybrid retrieval (Anthropic Contextual Retrieval recipe).
+# - HYBRID_RETRIEVAL: bật dual vector dense (Voyage) + sparse (BM25 + underthesea)
+#   trong Qdrant, fuse RRF server-side qua /points/query API. Mặc định ON;
+#   tắt (=0) để rollback về dense-only nếu hybrid lỗi.
+# - CONTEXTUAL_CHUNKING: bật Haiku-generated context prefix cho mỗi chunk
+#   trước khi embed/sparse-encode. Anthropic recipe: -49% fail rate kèm BM25.
+# - BM25_HASH_BUCKETS: số buckets cho stable hash token → vocab id. 2^24 = 16M
+#   đủ cho corpus < 1M unique tokens với rate collision < 1%.
+HYBRID_RETRIEVAL: bool = os.getenv("HYBRID_RETRIEVAL", "1").strip().lower() not in ("0", "false", "no", "off")
+CONTEXTUAL_CHUNKING: bool = os.getenv("CONTEXTUAL_CHUNKING", "1").strip().lower() not in ("0", "false", "no", "off")
+BM25_HASH_BUCKETS: int = int(os.getenv("BM25_HASH_BUCKETS", str(1 << 24)))
+# RRF prefetch limit per branch — mỗi nhánh dense/sparse pull tối đa N candidate
+# rồi Qdrant fuse. 30 đủ rộng để chunk đúng lọt qua nhưng không quá nhiều noise.
+HYBRID_PREFETCH_LIMIT: int = int(os.getenv("HYBRID_PREFETCH_LIMIT", "30"))
+
 # API
 API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
 API_PORT: int = int(os.getenv("API_PORT", "8000"))
@@ -92,7 +107,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # Cap kích thước 1 file (MB) — vượt sẽ reject ngay khi streaming write
 MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "5120"))         # 5GB default
 # Số job xử lý song song trong worker pool
-INGEST_WORKER_CONCURRENCY: int = int(os.getenv("INGEST_WORKER_CONCURRENCY", "2"))
+INGEST_WORKER_CONCURRENCY: int = int(os.getenv("INGEST_WORKER_CONCURRENCY", "4"))
 # Cap số file/batch (multipart array hoặc from-urls)
 INGEST_MAX_BATCH_SIZE: int = int(os.getenv("INGEST_MAX_BATCH_SIZE", "50"))
 # Job giữ trong RAM bao lâu sau khi done/failed (giây)
@@ -105,3 +120,10 @@ UPLOAD_STREAM_CHUNK: int = int(os.getenv("UPLOAD_STREAM_CHUNK", str(1 << 20)))  
 PREVIEW_MAX_PAGES: int = int(os.getenv("PREVIEW_MAX_PAGES", "5"))
 # Số giây đầu video transcribe để gen metadata preview
 PREVIEW_VIDEO_CLIP_SEC: int = int(os.getenv("PREVIEW_VIDEO_CLIP_SEC", "180"))
+
+# --- Backend document webhook ---
+# AI POST {document_id, status} sang BE khi ingest job đạt terminal (done/failed).
+# BE truyền `document_id` xuống cùng `from-url` payload; nếu trống thì bỏ qua call.
+# Cấu hình BẮT BUỘC ở .env (BACKEND_DOCUMENT_WEBHOOK_URL + BACKEND_WEBHOOK_API_KEY).
+BACKEND_DOCUMENT_WEBHOOK_URL: str = os.getenv("BACKEND_DOCUMENT_WEBHOOK_URL", "")
+BACKEND_WEBHOOK_API_KEY: str = os.getenv("BACKEND_WEBHOOK_API_KEY", "")

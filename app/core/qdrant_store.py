@@ -5,7 +5,15 @@ from typing import Any
 
 import requests
 
+from app import config
+
 UPSERT_BATCH = 64
+
+# Named vector IDs cho hybrid retrieval.
+# - "dense":  Voyage 1024-dim, distance Cosine.
+# - "sparse": BM25 với modifier IDF — Qdrant tự nhân IDF lúc query.
+DENSE_VECTOR_NAME: str = "dense"
+SPARSE_VECTOR_NAME: str = "sparse"
 
 # ── 10 domain slugs (ASCII) — khớp với NestJS Categories seeder ─────────────
 # Source: knowledge_center_backend/src/database/seeds/categories.seeder.ts
@@ -25,8 +33,6 @@ DOMAINS: list[str] = [
 
 # Legacy persona key (Vietnamese có dấu) → slug. Dùng cho backward compat khi
 # client cũ vẫn gửi persona VN ("công nghệ thông tin") thay vì slug ("cntt").
-# Không có entry "mặc định" vì không có collection tương ứng — chat chung đi
-# qua nhánh fanout trong Retriever (domain=None).
 PERSONA_TO_DOMAIN: dict[str, str] = {
     "bim":                   "bim",
     "mep":                   "mep",
@@ -45,7 +51,19 @@ DOMAIN_TO_PERSONA: dict[str, str] = {v: k for k, v in PERSONA_TO_DOMAIN.items()}
 
 
 class QdrantStore:
-    """Read-write store cho 1 Qdrant collection cụ thể."""
+    """Read-write store cho 1 Qdrant collection — hybrid native (dense + sparse).
+
+    Schema collection được tạo bởi ``ensure_collection``:
+        vectors:        { "dense":  size=1024, Cosine, HNSW }
+        sparse_vectors: { "sparse": modifier="idf" }
+
+    Ingest call ``upsert(points)`` với mỗi point có ``vector`` (dense list)
+    và ``sparse`` (dict {indices, values}) — sparse có thể None để skip.
+
+    Search dùng Qdrant Query API với prefetch fusion RRF khi cả 2 vector có
+    sẵn; nếu sparse query None hoặc HYBRID_RETRIEVAL=0 → fallback dense-only
+    qua cùng Query API (vẫn 1 HTTP call).
+    """
 
     def __init__(
         self,
@@ -53,13 +71,11 @@ class QdrantStore:
         api_key: str,
         collection: str,
         vector_size: int = 1024,
-        vector_name: str = "",
     ):
         self.url = url.rstrip("/")
         self.api_key = api_key
         self.collection = collection
         self.vector_size = vector_size
-        self.vector_name = vector_name
 
     def _headers(self) -> dict:
         return {"api-key": self.api_key, "Content-Type": "application/json"}
@@ -93,17 +109,23 @@ class QdrantStore:
             raise
         body = {
             "vectors": {
-                self.vector_name: {
+                DENSE_VECTOR_NAME: {
                     "size": self.vector_size,
                     "distance": "Cosine",
                     "on_disk": False,
                     "hnsw_config": {"m": 24, "payload_m": 24, "ef_construct": 256},
                     "datatype": "float32",
                 }
-            }
+            },
+            "sparse_vectors": {
+                SPARSE_VECTOR_NAME: {
+                    "modifier": "idf",
+                    "index": {"on_disk": False},
+                }
+            },
         }
         self._req("PUT", f"/collections/{self.collection}", body)
-        print(f"qdrant collection '{self.collection}' created")
+        print(f"qdrant collection '{self.collection}' created (hybrid: dense+sparse)")
 
     def ensure_payload_indexes(self, fields: list[str]) -> None:
         """Tạo payload keyword index (idempotent). Không raise khi collection chưa tồn tại."""
@@ -119,19 +141,31 @@ class QdrantStore:
                 print(f"qdrant ensure_payload_indexes({self.collection}.{field}) skipped: {exc}")
 
     def upsert(self, points: list[dict], wait: bool = True) -> None:
+        """Upsert points với dense + (optional) sparse vector.
+
+        Mỗi point dict format:
+            { id, vector: [1024 floats], sparse: {indices, values} | None,
+              payload: {...} }
+
+        Sparse None hoặc rỗng → chỉ upsert dense (point vẫn searchable qua
+        prefetch dense, miss prefetch sparse — RRF tự bỏ).
+        """
         # Đảm bảo collection tồn tại trước khi đẩy dữ liệu (phòng trường hợp bị xoá khi server đang chạy)
         self.ensure_collection()
 
         for i in range(0, len(points), UPSERT_BATCH):
             batch = points[i : i + UPSERT_BATCH]
-            formatted = [
-                {
+            formatted = []
+            for p in batch:
+                vec_dict: dict[str, Any] = {DENSE_VECTOR_NAME: p["vector"]}
+                sparse = p.get("sparse")
+                if sparse and sparse.get("indices"):
+                    vec_dict[SPARSE_VECTOR_NAME] = sparse
+                formatted.append({
                     "id": p.get("id", str(uuid.uuid4())),
-                    "vector": {self.vector_name: p["vector"]},
+                    "vector": vec_dict,
                     "payload": p.get("payload", {}),
-                }
-                for p in batch
-            ]
+                })
             self._req(
                 "PUT",
                 f"/collections/{self.collection}/points?wait={str(wait).lower()}",
@@ -145,16 +179,56 @@ class QdrantStore:
         limit: int = 7,
         filter: dict | None = None,
         with_payload: bool = True,
+        sparse_vector: dict | None = None,
     ) -> list[dict]:
+        """Hybrid search qua Query API.
+
+        Khi ``sparse_vector`` có giá trị + HYBRID_RETRIEVAL bật → 2 prefetch
+        (dense + sparse) fuse RRF server-side. Ngược lại → dense-only prefetch.
+        Cả hai trường hợp đều 1 HTTP call duy nhất.
+        """
+        prefetch_limit = config.HYBRID_PREFETCH_LIMIT
+        prefetch: list[dict] = [
+            {
+                "query": query_vector,
+                "using": DENSE_VECTOR_NAME,
+                "limit": prefetch_limit,
+            }
+        ]
+        use_sparse = (
+            config.HYBRID_RETRIEVAL
+            and sparse_vector is not None
+            and bool(sparse_vector.get("indices"))
+        )
+        if use_sparse:
+            prefetch.append({
+                "query": sparse_vector,
+                "using": SPARSE_VECTOR_NAME,
+                "limit": prefetch_limit,
+            })
+
         body: dict[str, Any] = {
-            "vector": {"name": self.vector_name, "vector": query_vector},
+            "prefetch": prefetch,
             "limit": limit,
             "with_payload": with_payload,
         }
+        if use_sparse:
+            body["query"] = {"fusion": "rrf"}
+        else:
+            # Dense-only: không cần fusion, chỉ trả prefetch top.
+            # Qdrant Query API yêu cầu "query" field — copy dense vec.
+            body["query"] = query_vector
+            body["using"] = DENSE_VECTOR_NAME
+            body.pop("prefetch")
         if filter:
             body["filter"] = filter
-        result = self._req("POST", f"/collections/{self.collection}/points/search", body)
-        return result.get("result", [])
+
+        result = self._req("POST", f"/collections/{self.collection}/points/query", body)
+        # Query API trả {"result": {"points": [...]}} hoặc {"result": [...]} tuỳ version.
+        raw = result.get("result", [])
+        if isinstance(raw, dict):
+            return raw.get("points", [])
+        return raw
 
     def scroll(self, filter: dict | None = None, limit: int = 100) -> list[dict]:
         body: dict[str, Any] = {"limit": limit, "with_payload": True}
@@ -166,6 +240,12 @@ class QdrantStore:
     def delete_by_filter(self, filter: dict) -> None:
         self.ensure_collection()
         self._req("POST", f"/collections/{self.collection}/points/delete", {"filter": filter})
+
+    def count_by_filter(self, filter: dict, exact: bool = True) -> int:
+        """Đếm số point khớp filter. Dùng cho audit trước khi delete."""
+        body = {"filter": filter, "exact": exact}
+        result = self._req("POST", f"/collections/{self.collection}/points/count", body)
+        return int(result.get("result", {}).get("count", 0))
 
 
 # ── QdrantRegistry ────────────────────────────────────────────────────────────
@@ -183,24 +263,11 @@ class QdrantRegistry:
         registry.get_by_persona("công nghệ thông tin", "docs")  → tương tự trên
     """
 
-    # 20 collections
-    # tdi_docs_bim          tdi_videos_bim
-    # tdi_docs_mep          tdi_videos_mep
-    # tdi_docs_marketing    tdi_videos_marketing
-    # tdi_docs_phap_ly      tdi_videos_phap_ly
-    # tdi_docs_san_xuat     tdi_videos_san_xuat
-    # tdi_docs_cong_nghe    tdi_videos_cong_nghe
-    # tdi_docs_nhan_su      tdi_videos_nhan_su
-    # tdi_docs_tai_chinh    tdi_videos_tai_chinh
-    # tdi_docs_kinh_doanh   tdi_videos_kinh_doanh
-    # tdi_docs_thiet_ke     tdi_videos_thiet_ke
-
     def __init__(
         self,
         url: str,
         api_key: str,
         vector_size: int = 1024,
-        vector_name: str = "",
     ):
         print(f"Initializing QdrantRegistry for cluster: {url}")
         self.url = url
@@ -215,35 +282,18 @@ class QdrantRegistry:
                     api_key=api_key,
                     collection=f"tdi_{source}_{domain}",
                     vector_size=vector_size,
-                    vector_name=vector_name,
                 )
 
     # ── Lookup helpers ────────────────────────────────────────────────────────
 
     def get(self, domain: str, source: str) -> QdrantStore:
-        """
-        Lấy store theo domain slug + source type.
-            registry.get("bim", "docs")
-            registry.get("tong_quat", "videos")
-        Raise KeyError nếu domain/source không hợp lệ.
-        """
         return self._stores[f"{domain}__{source}"]
 
     def get_by_persona(self, persona_key: str, source: str) -> QdrantStore:
-        """
-        Dùng trực tiếp key từ DOMAIN_PERSONAS — tiện khi nhận domain từ FE.
-            registry.get_by_persona("công nghệ thông tin", "docs")
-            registry.get_by_persona("bim", "videos")
-
-        Nhận cả persona key ("công nghệ thông tin") lẫn slug ("cntt").
-        Raise KeyError nếu không nhận ra — chat chung phải đi qua Retriever
-        với domain=None, không được rơi vào hàm này.
-        """
         slug = PERSONA_TO_DOMAIN.get(persona_key, persona_key)
         return self.get(slug, source)
 
     def stores_for_domain(self, domain: str) -> list[QdrantStore]:
-        """Trả [docs_store, videos_store] cho 1 domain slug."""
         return [self.get(domain, "docs"), self.get(domain, "videos")]
 
     def all_docs_stores(self) -> list[QdrantStore]:
@@ -256,21 +306,16 @@ class QdrantRegistry:
         return list(self._stores.values())
 
     def collection_names(self) -> list[str]:
-        """Danh sách 24 tên collection — dùng để log/debug."""
         return [s.collection for s in self._stores.values()]
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def ensure_all(self) -> None:
-        """
-        Gọi 1 lần lúc lifespan startup.
-        """
         created = 0
         for store in self._stores.values():
             try:
                 store.ensure_collection()
-                # Tạo index cho các field dùng trong filter/dedup
-                store.ensure_payload_indexes(["doc_id", "domain", "metadata.domain"])
+                store.ensure_payload_indexes(["doc_id", "document_id", "domain", "metadata.domain"])
                 created += 1
             except Exception as e:
                 print(f"ensure_all: FAILED for collection '{store.collection}': {e}")
@@ -281,13 +326,12 @@ class QdrantRegistry:
         )
 
 
-# ── VMediaReadOnlyStore (giữ nguyên) ─────────────────────────────────────────
+# ── VMediaReadOnlyStore ──────────────────────────────────────────────────────
+# Cluster RIÊNG, schema legacy (single dense vector). Không tham gia hybrid —
+# vmedia search vẫn dùng /points/search dense-only như cũ.
 
 class VMediaReadOnlyStore:
-    """
-    Read-only store cho vmedia collections trên cluster RIÊNG.
-    Không bao giờ ghi.
-    """
+    """Read-only store cho vmedia collections trên cluster ngoài (single dense vec)."""
 
     def __init__(
         self,
@@ -311,6 +355,7 @@ class VMediaReadOnlyStore:
         limit: int = 5,
         filter: dict | None = None,
         with_payload: bool = True,
+        sparse_vector: dict | None = None,  # signature compat — vmedia ignore sparse
     ) -> list[dict]:
         all_results: list[dict] = []
         per_col_limit = max(3, limit // len(self.collections) + 1) if self.collections else limit

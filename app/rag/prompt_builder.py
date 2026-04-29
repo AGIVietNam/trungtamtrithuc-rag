@@ -607,72 +607,77 @@ def _build_excerpt(text: str) -> str:
     return normalized[:_EXCERPT_MAX_CHARS].rstrip() + "…"
 
 
-def build_sources_mapping(hits: list[Hit]) -> list[dict]:
-    """Dedup source mapping phẳng cho FE render.
+def build_sources_from_citations(
+    hits: list[Hit], citations: list[dict]
+) -> list[dict]:
+    """Source mapping bám đúng từng citation Claude trả về.
 
-    Mỗi position được gắn kèm ``excerpt`` — đoạn text gốc của chunk tại vị trí
-    đó (trang với tài liệu, timestamp với video) để FE hiển thị minh chứng
-    trực tiếp ngay dưới nguồn tham khảo.
+    Khác với cách cũ (cắt 320 ký tự đầu của cả chunk), hàm này iterate theo
+    từng citation và lấy ``cited_text`` — đoạn nguyên văn Anthropic Citations
+    API khẳng định Claude đã đọc — làm excerpt cho mỗi position. Nhờ vậy FE
+    hiển thị đúng câu được dùng trả lời, neo theo trang/timestamp của chunk
+    chứa câu đó.
+
+    Dedup: nhiều citation cùng trỏ về (source, page/timestamp, cited_text)
+    sẽ gộp thành 1 position duy nhất.
     """
     seen: dict[str, dict] = {}
-    for hit in hits:
+    for c in citations:
+        idx = c.get("doc_index")
+        if not isinstance(idx, int) or not (0 <= idx < len(hits)):
+            continue
+        hit = hits[idx]
         fields = _resolve_source_fields(hit.payload)
+        cited_raw = (c.get("cited_text") or "").strip()
+        # Fallback hiếm: API trả cited_text rỗng → dùng excerpt cả chunk để
+        # vẫn có gì đó hiển thị dưới pill thay vì khoảng trống.
+        cited_excerpt = (
+            _build_excerpt(cited_raw) if cited_raw else _build_excerpt(hit.text)
+        )
+
         key = f"{fields['title']}||{fields['base_url']}"
-        excerpt = _build_excerpt(hit.text)
         if key not in seen:
             seen[key] = {
                 "source_type": hit.source_type,
                 "title": fields["title"],
-                "url": _build_youtube_url_with_timestamp(
-                    fields["base_url"], fields["ts_secs"]
-                ),
                 "base_url": fields["base_url"],
                 "page": fields["page"],
                 "timestamp": fields["ts_display"],
                 "timestamp_secs": fields["ts_secs"],
                 "score": hit.score,
-                "excerpt": excerpt,
+                "excerpt": cited_excerpt,
                 "positions": [],
+                "_seen_pos": set(),
             }
         entry = seen[key]
         if hit.score > entry["score"]:
             entry["score"] = hit.score
-            if excerpt:
-                entry["excerpt"] = excerpt
-        elif not entry.get("excerpt") and excerpt:
-            entry["excerpt"] = excerpt
 
         if fields["ts_display"] is not None:
-            existing = next(
-                (p for p in entry["positions"] if p.get("timestamp") == fields["ts_display"]),
-                None,
-            )
-            if existing is None:
-                entry["positions"].append(
-                    {
-                        "timestamp": fields["ts_display"],
-                        "url": _build_youtube_url_with_timestamp(
-                            fields["base_url"], fields["ts_secs"]
-                        ),
-                        "excerpt": excerpt,
-                    }
-                )
-            elif not existing.get("excerpt") and excerpt:
-                existing["excerpt"] = excerpt
-        if fields["page"] is not None:
-            existing = next(
-                (p for p in entry["positions"] if p.get("page") == fields["page"]),
-                None,
-            )
-            if existing is None:
-                entry["positions"].append(
-                    {"page": fields["page"], "excerpt": excerpt}
-                )
-            elif not existing.get("excerpt") and excerpt:
-                existing["excerpt"] = excerpt
+            position: dict = {
+                "timestamp": fields["ts_display"],
+                "url": _build_youtube_url_with_timestamp(
+                    fields["base_url"], fields["ts_secs"]
+                ),
+                "excerpt": cited_excerpt,
+            }
+        elif fields["page"] is not None:
+            position = {"page": fields["page"], "excerpt": cited_excerpt}
+        else:
+            position = {"excerpt": cited_excerpt}
+
+        dedup_key = (
+            position.get("timestamp"),
+            position.get("page"),
+            position["excerpt"],
+        )
+        if dedup_key not in entry["_seen_pos"]:
+            entry["_seen_pos"].add(dedup_key)
+            entry["positions"].append(position)
 
     mapping: list[dict] = []
     for idx, entry in enumerate(seen.values(), 1):
+        entry.pop("_seen_pos", None)
         first_pos_url = (
             entry["positions"][0]["url"]
             if entry["positions"] and "url" in entry["positions"][0]

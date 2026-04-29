@@ -11,7 +11,7 @@ from app.schemas import ChatRequest, ChatResponse
 from app.config import (
     ANTHROPIC_API_KEY, CLAUDE_MODEL,
     VOYAGE_API_KEY, VOYAGE_MODEL, VOYAGE_DIM,
-    QDRANT_URL, QDRANT_API_KEY, QDRANT_VECTOR_NAME,
+    QDRANT_URL, QDRANT_API_KEY,
     QDRANT_VMEDIA_URL, QDRANT_VMEDIA_API_KEY, VMEDIA_COLLECTIONS,
     TOP_K, RERANK_TOP_K,
     CONV_WINDOW_TURNS,
@@ -78,7 +78,6 @@ def _get_chain() -> RAGChain:
         url=QDRANT_URL,
         api_key=QDRANT_API_KEY,
         vector_size=VOYAGE_DIM,
-        vector_name=QDRANT_VECTOR_NAME,
     )
     vmedia_store = VMediaReadOnlyStore(
         url=QDRANT_VMEDIA_URL, vmedia_api_key=QDRANT_VMEDIA_API_KEY,
