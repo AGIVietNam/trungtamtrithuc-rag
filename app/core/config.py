@@ -36,6 +36,10 @@ VOYAGE_DIM: int = int(_opt("VOYAGE_DIM", "1024"))
 # --- Qdrant (main cluster — ttt_*) ---
 QDRANT_URL: str = _req("QDRANT_URL")
 QDRANT_API_KEY: str = _req("QDRANT_API_KEY")
+# Named vector trong collection — team setup `dense` cho cluster chính.
+# Collection nào được tạo từ pipeline AI sẽ tự dùng tên này; nếu collection
+# đã tồn tại với tên khác → upsert sẽ fail "Not existing vector name".
+QDRANT_VECTOR_NAME: str = _opt("QDRANT_VECTOR_NAME", "")
 
 # --- Qdrant (vmedia cluster — READ ONLY) ---
 QDRANT_VMEDIA_URL: str = _opt("QDRANT_VMEDIA_URL", "https://dd2f49bd-a20a-49b6-abf3-a4805b544ff2.us-east4-0.gcp.cloud.qdrant.io:6333")
@@ -74,3 +78,14 @@ BASE_DIR = Path(__file__).parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 SESSIONS_DIR = DATA_DIR / "sessions"
 UPLOADS_DIR = DATA_DIR / "uploads"
+
+# --- S3 (Viettel IDC, S3-compatible) — dùng cho lưu ảnh trích từ tài liệu ---
+# BE upload file gốc lên cùng bucket; AI service upload ảnh extract vào prefix
+# `images/{doc_id}/{image_id}.png`. Bucket public-read → URL trả thẳng FE.
+S3_REGION: str = _opt("S3_REGION", "us-east-1")
+S3_ENDPOINT: str = _opt("S3_ENDPOINT", "")
+S3_BUCKET_NAME: str = _opt("S3_BUCKET_NAME", "")
+S3_ACCESS_KEY_ID: str = _opt("S3_ACCESS_KEY_ID", "")
+S3_SECRET_ACCESS_KEY: str = _opt("S3_SECRET_ACCESS_KEY", "")
+# Endpoint dùng để build public URL trả FE — thường giống S3_ENDPOINT.
+S3_PUBLIC_ENDPOINT: str = _opt("S3_PUBLIC_ENDPOINT", S3_ENDPOINT)

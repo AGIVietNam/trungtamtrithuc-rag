@@ -648,10 +648,28 @@ def build_sources_from_citations(
                 "excerpt": cited_excerpt,
                 "positions": [],
                 "_seen_pos": set(),
+                "images": [],
+                "_seen_image_ids": set(),
             }
         entry = seen[key]
         if hit.score > entry["score"]:
             entry["score"] = hit.score
+
+        # Aggregate images từ payload chunks. Mỗi citation chỉ trỏ tới 1 hit,
+        # nhưng nhiều citation có thể cùng trỏ về 1 source → dedupe theo
+        # image_id để source pill chỉ chứa unique URLs.
+        for img in (hit.payload.get("images") or []):
+            iid = img.get("image_id")
+            url = img.get("url")
+            if not iid or not url or iid in entry["_seen_image_ids"]:
+                continue
+            entry["_seen_image_ids"].add(iid)
+            entry["images"].append({
+                "image_id": iid,
+                "url": url,
+                "caption": (img.get("caption") or "").strip(),
+                "page": img.get("page"),
+            })
 
         if fields["ts_display"] is not None:
             position: dict = {
@@ -678,6 +696,7 @@ def build_sources_from_citations(
     mapping: list[dict] = []
     for idx, entry in enumerate(seen.values(), 1):
         entry.pop("_seen_pos", None)
+        entry.pop("_seen_image_ids", None)
         first_pos_url = (
             entry["positions"][0]["url"]
             if entry["positions"] and "url" in entry["positions"][0]
@@ -694,6 +713,7 @@ def build_sources_from_citations(
                 "score": entry["score"],
                 "excerpt": entry.get("excerpt", ""),
                 "positions": entry["positions"],
+                "images": entry.get("images", []),
             }
         )
     return mapping
@@ -812,6 +832,7 @@ def build_user_content(
     conv_block: str,
     low_confidence: bool = False,
     user_profile: dict | None = None,
+    images_section: str = "",
 ) -> list[dict]:
     """Ráp user message dạng list content cho Anthropic Citations API.
 
@@ -820,12 +841,17 @@ def build_user_content(
           {type:document, citations:{enabled:true}, ...},   # hit 1
           {type:document, ...},                              # hit 2
           ...
-          {type:text, text: "<user_identity>...<conv>...<task>... Câu hỏi: ..."}
+          {type:text, text: "<user_identity>...<conv>...<images>...<task>... Câu hỏi: ..."}
         ]
 
     Document blocks ở TOP (long-context tip) — Anthropic cite được tới
     char-range cụ thể trong từng block. user_identity (auth context) + conv
-    block + task reminder + query đi vào 1 text block ở cuối.
+    block + images_section + task reminder + query đi vào 1 text block ở cuối.
+
+    `images_section` (tùy chọn): XML block `<available_images>` từ
+    `app.rag.image_markers.build_available_images_section(hits)` — instruct
+    Claude chèn marker `[IMG:image_id]` vào câu liên quan. Đặt SAU conv (Claude
+    đã thấy ngữ cảnh) và TRƯỚC task reminder (rule cuối cùng để follow).
     """
     text_parts: list[str] = []
     identity_block = build_user_identity_block(user_profile)
@@ -833,6 +859,8 @@ def build_user_content(
         text_parts.append(identity_block)
     if conv_block:
         text_parts.append(conv_block)
+    if images_section:
+        text_parts.append(images_section)
     if doc_blocks or conv_block:
         if low_confidence:
             text_parts.append(_LOW_CONFIDENCE_HINT)

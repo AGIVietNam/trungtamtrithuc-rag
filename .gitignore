@@ -7,9 +7,24 @@ venv
 venv39_backup
 data/logs/
 data/sessions/
+data/uploads/
 test.md
 test2.md
 test_kh_truyenthong.md
 anh
 .venv
+.json
+
+# Office docs (test fixtures, ingested files) — không push binary lên repo.
+*.docx
+*.doc
+*.xlsx
+*.xls
+*.pptx
+*.ppt
+*.pdf
+
+# requirements_macos.txt = local dev only (filtered torch CUDA lines).
+requirements_macos.txt
+
 Form nội dung order thiết kế.pdf

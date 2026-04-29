@@ -76,6 +76,7 @@ class Retriever:
         sources: list[str] | None = None,
         query_vec: list[float] | None = None,
         sparse_vec: dict | None = None,
+        doc_id: str | None = None,          # Hạn chế chỉ chunks của 1 doc (E2E test)
     ) -> list[Hit]:
         if sources is None:
             sources = ["documents", "videos"]
@@ -85,6 +86,12 @@ class Retriever:
         # Encode local (~5-20ms) nên hợp lệ trong synchronous path.
         if sparse_vec is None and config.HYBRID_RETRIEVAL:
             sparse_vec = sparse_encoder.encode(query)
+
+        # Filter Qdrant payload — hiện chỉ hỗ trợ doc_id, mở rộng dễ về sau.
+        # Áp dụng cho doc/video stores, KHÔNG áp dụng vmedia (collection ngoài).
+        doc_filter: dict | None = None
+        if doc_id:
+            doc_filter = {"must": [{"key": "doc_id", "match": {"value": doc_id}}]}
 
         # ── Chọn stores theo domain ──────────────────────────────────────────
         if domain:
@@ -105,10 +112,13 @@ class Retriever:
         # pass cho vmedia (cluster ngoài, single-vector legacy schema).
         tasks: list[tuple] = []
         for store in doc_stores:
-            tasks.append((store, "document", query_vec, top_k, None, sparse_vec))
+            tasks.append((store, "document", query_vec, top_k, doc_filter, sparse_vec))
         for store in vid_stores:
-            tasks.append((store, "video", query_vec, top_k, None, sparse_vec))
+            tasks.append((store, "video", query_vec, top_k, doc_filter, sparse_vec))
         if "vmedia" in sources and self.vmedia_store.api_key:
+            # vmedia là collection ngoài (Viettel media), không có doc_id
+            # của hệ thống ta + không hỗ trợ sparse — bỏ cả 2 filter để tránh
+            # search trả 0 hit.
             tasks.append((self.vmedia_store, "vmedia", query_vec, top_k, None, None))
 
         # ── Search song song ─────────────────────────────────────────────────

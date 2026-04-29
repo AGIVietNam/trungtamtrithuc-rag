@@ -27,6 +27,10 @@ from app.rag.prompt_builder import (
     build_conversation_block,
     build_user_content,
 )
+from app.rag.image_markers import (
+    build_available_images_section,
+    resolve_image_markers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -526,12 +530,17 @@ class RAGChain:
         system_prompt = build_system_prompt(expert_domain)
         doc_blocks = build_documents_blocks(hits)
         conv_block = build_conversation_block(summary, recall_pairs)
+        # Inject `<available_images>` section nếu hits có ảnh — Claude sẽ tự
+        # chèn `[IMG:image_id]` marker vào câu liên quan. Empty string khi
+        # không có ảnh → no-op (không tốn token).
+        images_section = build_available_images_section(hits)
 
         low_conf = _top_score(hits) < _LOW_CONFIDENCE_SCORE
         user_content = build_user_content(
             query, doc_blocks, conv_block,
             low_confidence=low_conf,
             user_profile=self._build_profile(user_name, user_role, user_id),
+            images_section=images_section,
         )
         messages = list(history) + [{"role": "user", "content": user_content}]
 
@@ -596,6 +605,12 @@ class RAGChain:
                     citations = []
                     forced_refusal = True
                     forced_reason = f"faithfulness:{reason[:80]}"
+
+        # Resolve `[IMG:image_id]` markers → markdown `![cap](url)` (Strategy B
+        # inline images). Skip nếu forced_refusal — answer đã thay bằng
+        # _REFUSAL_TEMPLATE, không có marker.
+        if not forced_refusal and hits:
+            answer_text = resolve_image_markers(answer_text, hits)
 
         clean_answer, suggested_questions = _extract_suggestions(answer_text)
 
@@ -755,12 +770,17 @@ class RAGChain:
         system_prompt = build_system_prompt(expert_domain)
         doc_blocks = build_documents_blocks(hits)
         conv_block = build_conversation_block(summary, recall_pairs)
+        # Inject `<available_images>` section nếu hits có ảnh — Claude sẽ tự
+        # chèn `[IMG:image_id]` marker vào câu liên quan. Empty string khi
+        # không có ảnh → no-op (không tốn token).
+        images_section = build_available_images_section(hits)
 
         low_conf = _top_score(hits) < _LOW_CONFIDENCE_SCORE
         user_content = build_user_content(
             query, doc_blocks, conv_block,
             low_confidence=low_conf,
             user_profile=self._build_profile(user_name, user_role, user_id),
+            images_section=images_section,
         )
         messages = list(history) + [{"role": "user", "content": user_content}]
 
@@ -818,6 +838,12 @@ class RAGChain:
                     full_text = _REFUSAL_TEMPLATE
                     citations = []
                     forced_refusal = True
+
+        # Resolve `[IMG:image_id]` markers → markdown `![cap](url)`. Stream
+        # path: FE đã thấy raw marker trong delta events, sẽ thay bằng
+        # `full_text` resolved ở "done" event này (chat.html xử lý).
+        if not forced_refusal and hits:
+            full_text = resolve_image_markers(full_text, hits)
 
         _, suggested_questions = _extract_suggestions(full_text)
 

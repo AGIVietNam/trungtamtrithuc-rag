@@ -357,26 +357,34 @@ def ingest_document(
             doc_id, store.collection,
         )
 
-    # Flatten pages
+    # Flatten pages — kéo theo images metadata per page (PDF/parser mới trả về).
+    # Page chỉ có ảnh không text vẫn được giữ lại để ảnh không "biến mất".
+    # `sheet_name` chỉ XLSX có (parse_xlsx set), PDF/DOCX là "" → display logic
+    # ở payload chỉ thêm field này khi non-empty.
     if isinstance(content, list):
-        page_texts = [(item["page"], item["text"]) for item in content if item["text"].strip()]
+        page_data: list[tuple[int, str, list[dict], str]] = [
+            (item["page"], item["text"], item.get("images", []) or [],
+             item.get("sheet_name", "") or "")
+            for item in content
+            if item["text"].strip() or item.get("images")
+        ]
     else:
-        page_texts = [(1, content)]
+        page_data = [(1, content, [], "")]
 
-    num_pages = len(page_texts)
+    num_pages = len(page_data)
     embedder = VoyageEmbedder(api_key=config.VOYAGE_API_KEY, model=config.VOYAGE_MODEL)
 
     # Full doc text: dùng cho contextual chunking (Anthropic recipe). Concat tất
     # cả page text — Haiku sẽ thấy toàn cảnh tài liệu khi sinh ngữ cảnh cho
     # mỗi chunk. Prompt caching giữ doc cache trong 5 phút TTL → các chunk
     # sau hit cache.
-    full_doc_text = "\n\n".join(t for _, t in page_texts if t and t.strip())
+    full_doc_text = "\n\n".join(t for _, t, _, _ in page_data if t and t.strip())
     claude_for_ctx = _get_claude_for_context() if config.CONTEXTUAL_CHUNKING else None
 
     all_points: list[dict] = []
     chunk_index = 0
 
-    for page_num, text in page_texts:
+    for page_num, text, page_images, sheet_name in page_data:
         embed_text, table_data, needs_vision = _process_content(text)
 
         # Vision with context for tables with empty cells (colors)
@@ -386,9 +394,15 @@ def ingest_document(
             if vision_text:
                 embed_text = embed_text + "\n\n" + vision_text if embed_text else vision_text
 
+        # Caption KHÔNG gộp vào embed_text. Caption sẽ được search qua synthetic
+        # image-caption chunks (sinh sau vòng for-loop này) — embed sạch tiếng
+        # Việt, score cao khi query match caption. Text chunk giữ images[]
+        # đầy đủ trong payload để recall theo text-relevant query.
         chunks = chunk_text(embed_text, max_tokens=config.CHUNK_MAX_TOKENS, overlap_tokens=config.CHUNK_OVERLAP_TOKENS)
         chunks = [c for c in chunks if c.text.strip() and c.token_count >= 10]
         if not chunks:
+            # Trang chỉ có ảnh, không có text/caption đủ dài để chunk → ảnh không
+            # vào store. v1 chấp nhận; v2 có thể emit chunk placeholder để giữ ảnh.
             continue
 
         # Contextual chunking — sinh prefix ngữ cảnh cho mỗi chunk dựa trên
@@ -399,6 +413,23 @@ def ingest_document(
         else:
             from app.core.contextual_chunker import ContextualChunk
             ctxs = [ContextualChunk(text=t, context="", embed_text=t) for t in chunk_texts_raw]
+
+        # Slim images payload — duplicate vào MỌI chunk của trang để recall không
+        # phụ thuộc chunk #1 phải win score (caption có khi nằm cuối embed_text).
+        # `url` = full public URL S3, FE load thẳng. Không có local filename nữa.
+        images_payload = [
+            {
+                "image_id": img["image_id"],
+                "url": img.get("url", ""),
+                "caption": img.get("caption", ""),
+                "page": img.get("page", page_num),
+                "ord": img.get("ord", 0),
+                "width": img.get("width", 0),
+                "height": img.get("height", 0),
+            }
+            for img in page_images
+            if img.get("url")  # Bỏ ảnh upload S3 fail (url rỗng) khỏi payload
+        ]
 
         # Embed dùng augmented text (context + chunk). Voyage không phân biệt —
         # embedding sẽ phản ánh cả ngữ cảnh và nội dung chunk.
@@ -426,6 +457,8 @@ def ingest_document(
                 "heading_path": chunk.heading_path,
                 "uploaded_at": uploaded_at,
             }
+            if sheet_name:
+                payload["sheet_name"] = sheet_name
             if document_id:
                 payload["document_id"] = document_id
             # Lưu context riêng — debug only, không ảnh hưởng search/citations.
@@ -433,6 +466,8 @@ def ingest_document(
                 payload["context"] = ctx.context
             if table_data and i == 0:
                 payload["table_data"] = table_data
+            if images_payload:
+                payload["images"] = images_payload
             # Store searchable metadata fields at top level
             if metadata:
                 if metadata.get("domain"):
@@ -454,12 +489,97 @@ def ingest_document(
             })
             chunk_index += 1
 
-        logger.info("Page %d: %d chunks, table_data=%s, vision=%s, contextual=%s, sparse=%s",
-                     page_num, len(chunks), bool(table_data), needs_vision,
-                     config.CONTEXTUAL_CHUNKING, config.HYBRID_RETRIEVAL)
+        logger.info(
+            "Page %d: %d chunks, table_data=%s, vision=%s, images=%d, contextual=%s, sparse=%s",
+            page_num, len(chunks), bool(table_data), needs_vision,
+            len(images_payload), config.CONTEXTUAL_CHUNKING, config.HYBRID_RETRIEVAL,
+        )
+
+    # === Synthetic image-caption chunks ===
+    # Mỗi ảnh duy nhất (theo image_id) → 1 chunk synthetic với text=caption.
+    # Mục đích: query tiếng Việt "có sơ đồ X không?" match trực tiếp caption
+    # → embed thuần tiếng Việt → score cao + chỉ 1 ảnh trong payload (precision).
+    # Text chunks gốc vẫn giữ images[] đầy đủ → recall fallback khi query
+    # match nội dung doc mà không match caption nào.
+    #
+    # chunk_type="image_caption" cho debug và để team có thể tune sau (vd
+    # boost/penalty score) ở reranker mà không phải re-ingest.
+    seen_image_ids: set[str] = set()
+    synthetic_units: list[tuple[dict, str, str]] = []  # (image_meta, caption, sheet_name)
+    for page_num, _, page_images, sheet_name in page_data:
+        for img in page_images:
+            image_id = img["image_id"]
+            caption = (img.get("caption") or "").strip()
+            # Skip nếu thiếu caption hoặc URL S3 (upload fail) — synthetic chunk
+            # không có URL thì FE không hiển thị được.
+            if not caption or not img.get("url") or image_id in seen_image_ids:
+                continue
+            seen_image_ids.add(image_id)
+            synthetic_units.append(
+                ({**img, "page": img.get("page", page_num)}, caption, sheet_name)
+            )
+
+    if synthetic_units:
+        captions = [c for _, c, _ in synthetic_units]
+        # 1 batch embed cho tất cả captions — Voyage chấp nhận multi-input.
+        # Caption chunks dùng plain dense embed (không context augmentation,
+        # không sparse) — mục tiêu là cross-lingual semantic match cho query
+        # tiếng Việt → caption ngắn, đủ rồi.
+        caption_vectors = embedder.embed_documents(captions)
+
+        for (img, caption, sheet_name), vector in zip(synthetic_units, caption_vectors):
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}-{chunk_index}"))
+            slim_image = {
+                "image_id": img["image_id"],
+                "url": img.get("url", ""),
+                "caption": caption,
+                "page": img["page"],
+                "ord": img.get("ord", 0),
+                "width": img.get("width", 0),
+                "height": img.get("height", 0),
+            }
+            payload: dict = {
+                "source_type": "document",
+                "chunk_type": "image_caption",
+                "doc_id": doc_id,
+                "source_name": original_name,
+                "page": img["page"],
+                "chunk_index": chunk_index,
+                "text": caption,
+                "heading_path": [],
+                "uploaded_at": uploaded_at,
+                "images": [slim_image],
+            }
+            if sheet_name:
+                payload["sheet_name"] = sheet_name
+            if document_id:
+                payload["document_id"] = document_id
+            if metadata:
+                if metadata.get("domain"):
+                    payload["domain"] = metadata["domain"]
+                if metadata.get("title"):
+                    payload["title"] = metadata["title"]
+                if metadata.get("description"):
+                    payload["description"] = metadata["description"]
+                if metadata.get("tags"):
+                    payload["tags"] = metadata["tags"]
+                if metadata.get("url"):
+                    payload["url"] = metadata["url"]
+                payload["extra_metadata"] = metadata
+            all_points.append({
+                "id": point_id,
+                "vector": vector,
+                "sparse": None,  # caption chunks không hybrid
+                "payload": payload,
+            })
+            chunk_index += 1
+
+        logger.info("Synthetic image-caption chunks: %d (deduped from %d images)",
+                    len(synthetic_units),
+                    sum(len(p[2]) for p in page_data))
 
     store.upsert(all_points)
-    logger.info("Ingested %s: doc_id=%s pages=%d chunks=%d",
-                original_name, doc_id, num_pages, chunk_index)
+    logger.info("Ingested %s: doc_id=%s pages=%d chunks=%d (incl. %d image-captions)",
+                original_name, doc_id, num_pages, chunk_index, len(synthetic_units))
     return IngestResult(doc_id=doc_id, num_chunks=chunk_index,
                         num_pages=num_pages, source_name=original_name)
