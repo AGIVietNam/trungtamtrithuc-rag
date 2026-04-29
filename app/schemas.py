@@ -85,6 +85,7 @@ class JobStatusResponse(BaseModel):
     started_at: float | None = None
     finished_at: float | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    message: str = ""  # Câu thông báo sẵn cho FE hiển thị khi status terminal
 
 
 class BatchSubmitResponse(BaseModel):

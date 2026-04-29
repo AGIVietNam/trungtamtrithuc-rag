@@ -41,8 +41,22 @@ class JobStatus:
     finished_at: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def message(self) -> str:
+        """Câu thông báo sẵn sàng cho FE hiển thị (toast/notification)."""
+        if self.status == "done":
+            return (
+                f"Đã lưu xong '{self.filename}' vào kho tri thức "
+                f"({self.chunks_added} chunks, {self.pages} trang)"
+            )
+        if self.status == "failed":
+            return f"Lưu '{self.filename}' thất bại: {self.error or 'lỗi không xác định'}"
+        return ""
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["message"] = self.message
+        return d
 
 
 @dataclass
