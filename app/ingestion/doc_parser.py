@@ -208,7 +208,7 @@ def _parse_with_docling(path: Path) -> list[dict] | None:
             pages = _docling_split_pages(doc)
             if pages:
                 logger.info("Docling %s: %d pages", path.name, len(pages))
-                return pages
+                return _stitch_table_captions(pages)
         logger.info("Docling %s: 1 page, %d chars", path.name, len(full_md))
         return [{"page": 1, "text": full_md}]
     except Exception:
@@ -293,7 +293,7 @@ def _vision_parse_pdf(path: Path, to_context: bool = False) -> list[dict]:
         text = _clean_markdown(text)
         logger.info("Vision page %d: %d chars", page_num, len(text))
         pages.append({"page": page_num, "text": text})
-    return pages
+    return _stitch_table_captions(pages)
 
 
 # --- Tier 3: pdfplumber ---
@@ -314,7 +314,7 @@ def _pdfplumber_parse(path: Path) -> list[dict]:
                 pages.append({"page": i, "text": text})
     except Exception:
         logger.exception("pdfplumber cannot open %s", path.name)
-    return pages
+    return _stitch_table_captions(pages) if pages else pages
 
 
 def _count_pdf_pages(path: Path) -> int:
@@ -324,6 +324,70 @@ def _count_pdf_pages(path: Path) -> int:
             return len(pdf.pages)
     except Exception:
         return 1
+
+
+# --- Caption stitching (fix bug 'split table' giữa các trang) ---
+
+# 'Bảng X.Y[.Z][-N]: ...' — caption phổ biến trong giáo trình tiếng Việt.
+# Cũng nhận 'Table X.Y' / 'Bảng X' không suffix.
+_CAPTION_RE = re.compile(
+    r"(B[ảa]ng|Table)\s+[\d][\d\.\-]*\s*[:\-—–]?[^\n]*",
+    re.IGNORECASE,
+)
+
+
+def _stitch_table_captions(pages: list[dict]) -> list[dict]:
+    """Sửa bug 'split table' xảy ra với mọi tier (Docling/Vision/pdfplumber):
+
+    - Caption 'Bảng X.Y: ...' nằm cuối page N
+    - Body |...| nằm đầu page N+1 (không có caption)
+    → prepend caption đang active vào đầu page N+1.
+
+    Cũng xử lý 'continued table' (bảng kéo dài 3+ trang): page N+2 cũng chỉ
+    là rows tiếp theo → vẫn prepend caption gốc.
+
+    Conditions để inject:
+    1. Dòng đầu (sau khi strip whitespace) bắt đầu bằng '|'  → page là continuation
+    2. Phần text trước table row đầu tiên KHÔNG có caption
+    3. active_caption tồn tại từ page trước
+    4. caption đó CHƯA xuất hiện trong page (tránh duplicate)
+
+    Trả list mới — không mutate input.
+    """
+    if not pages:
+        return list(pages)
+    out: list[dict] = [dict(p) for p in pages]
+    active_caption: str | None = None
+
+    for page in out:
+        text = page.get("text", "") or ""
+        if not text.strip():
+            continue
+
+        # 1) Inject TRƯỚC (dùng caption tích luỹ từ các page TRƯỚC).
+        #    Nếu cập nhật active_caption từ chính page này trước, caption
+        #    của bảng kế tiếp trên page sẽ ghi đè caption cần "tràn" từ
+        #    page trước → page có nhiều bảng sẽ bị mất caption đầu.
+        stripped = text.lstrip()
+        first_line = stripped.split("\n", 1)[0].strip()
+        if first_line.startswith("|"):
+            first_pipe = text.find("|")
+            prefix = text[:first_pipe] if first_pipe > 0 else ""
+            if not _CAPTION_RE.search(prefix) and active_caption:
+                # Chỉ skip inject khi caption đã ở ĐẦU text, không phải đâu đó
+                # giữa text (case page 9: 'Bảng 2.3.3-1' nằm sau bảng đầu).
+                if not text.lstrip().startswith(active_caption):
+                    page["text"] = f"{active_caption}\n\n{text}"
+                    text = page["text"]
+
+        # 2) Cập nhật active_caption từ caption CUỐI CÙNG trong page (sau inject).
+        #    Lấy caption cuối vì nếu page có nhiều bảng, caption gần body mới
+        #    nhất là caption sẽ "tràn" sang page kế tiếp.
+        captions = [m.group(0).strip() for m in _CAPTION_RE.finditer(text)]
+        if captions:
+            active_caption = captions[-1]
+
+    return out
 
 
 # --- Main PDF parser ---
@@ -365,7 +429,8 @@ def parse_pdf(path: Path, max_pages: int | None = None) -> list[dict]:
                 return parse_pdf(truncated)
             finally:
                 truncated.unlink(missing_ok=True)
-    # Tier 1: Docling — returns per-page list if quality OK
+    # Tier 1: Docling — returns per-page list if quality OK.
+    # Mỗi tier helper tự apply _stitch_table_captions() trước khi trả.
     pages = _docling_parse(path)
     if pages:
         return pages
