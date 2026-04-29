@@ -16,8 +16,13 @@ Tính năng chính:
 7. **Gợi ý câu hỏi tiếp theo** tự động sau mỗi câu trả lời.
 8. **Hybrid memory 3 tầng** — sliding window + rolling summary (cùng session) + vector recall cross-session theo user.
 9. **Prompt caching 2 breakpoint** — cache persona+rules (system) và lịch sử hội thoại (messages) để cắt ~90% cost+latency ở turn thứ 2 trở đi.
+10. **Hybrid retrieval (dense + sparse) — Anthropic Contextual Retrieval recipe**:
+    - Voyage `voyage-3` dense (1024-dim, ngữ nghĩa) song song BM25 sparse (lexical, IDF) qua Qdrant Query API + RRF fusion server-side.
+    - **Contextual chunking** với Haiku + prompt caching — prepend ngữ cảnh tài liệu vào mỗi chunk trước khi embed.
+    - **Vietnamese tokenizer** `underthesea` (accuracy 80%) cho BM25.
+    - Fix brittleness: query "form order thiết kế" và "hướng dẫn điền form nội dung order thiết kế" cho cùng top chunk (Δ sigmoid < 0.05).
 
-Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5** (Vision + describe table + query rewrite + metadata gen), **Voyage AI** (`voyage-3`, 1024-dim) cho embedding, **Qdrant Cloud** làm vector store.
+Bộ công nghệ lõi: **Claude Sonnet 4** (trả lời) + **Claude Haiku 4.5** (Vision + describe table + query rewrite + metadata gen + contextual chunking), **Voyage AI** (`voyage-3`, 1024-dim) cho dense embedding, **BM25 + underthesea** cho sparse, **BAAI/bge-reranker-v2-m3** rerank, **Qdrant Cloud** làm vector store hybrid.
 
 ---
 
@@ -157,11 +162,34 @@ FILE UPLOAD
     Tokenizer: tiktoken cl100k_base
     │
     ▼
-[EMBED] Voyage AI (voyage-3) → vector 1024-dim
+[CONTEXTUALIZE] app/core/contextual_chunker.py (Anthropic recipe)
+    Mỗi chunk → Haiku sinh 50-100 token mô tả ngữ cảnh tài liệu
+    (vd: "Đoạn này thuộc phần X của tài liệu Y, nói về Z").
+    Prompt caching: toàn doc đặt trong cache_control:ephemeral block →
+    N-1 chunks sau dùng cache, cost ~6.15 unit thay vì 50 cho doc 50 chunks.
+    Output: ContextualChunk(text, context, embed_text=context+"\n\n"+text).
+    Tắt qua env CONTEXTUAL_CHUNKING=0 để tiết kiệm Anthropic cost.
+    │
+    ▼
+[EMBED + SPARSE ENCODE] song song:
+    │
+    ├─ Voyage AI (voyage-3) → dense vector 1024-dim
+    │     Input: embed_text (= context + chunk.text)
+    │
+    └─ BM25 sparse (app/core/sparse_encoder.py)
+          Pipeline: text → underthesea word_tokenize (VN segment, 80% accuracy)
+                  → split compound → unigram tokens → filter stopwords + min_len
+                  → FNV-1a 64-bit hash mod BM25_HASH_BUCKETS (2^24)
+                  → SparseVector{indices, values=TF}
+          IDF do Qdrant tự nhân lúc query (modifier="idf").
+          Tắt qua env HYBRID_RETRIEVAL=0.
     │
     ▼
 [STORE] Qdrant — route theo metadata.domain (slug):
     collection = tdi_docs_{slug}  (VD: tdi_docs_bim, tdi_docs_cntt)
+    Schema hybrid:
+      vectors:        { "dense":  size=1024, Cosine, HNSW }
+      sparse_vectors: { "sparse": modifier="idf" }
     domain BẮT BUỘC có ở form upload; _resolve_domain_store raise ValueError
       nếu trống hoặc không ∈ 10 slug hợp lệ (accept cả persona VN cũ:
       "thiết kế" → "thiet_ke" qua PERSONA_TO_DOMAIN backward compat)
@@ -169,7 +197,8 @@ FILE UPLOAD
       (đổi domain cho cùng file → bản cũ ở domain khác còn lại, có chủ ý)
 
     Payload:
-      text: plain text (cho search + LLM đọc)
+      text: plain text chunk GỐC (cho Citations API trích đúng câu thật)
+      context: prefix ngữ cảnh do Haiku sinh (debug only, KHÔNG cite vào)
       table_data: bảng gốc Markdown (chỉ khi có bảng dữ liệu)
       heading_path: ["Chương", "Mục"]
       source_name, page, doc_id, uploaded_at
@@ -550,10 +579,15 @@ User query
     Cắt 1-3s/turn khi query đã standalone và đủ dài.
     │
     ▼
-[EMBED ONCE] Voyage embed_query (LRU cache 256 keys)
-    Cùng query string (normalized) trong phiên → trả vector cached, 0ms.
-    Vector này REUSE cho cả retriever + conv_memory — tiết kiệm 1 Voyage call/turn
-    (quan trọng với free tier 3 RPM).
+[EMBED ONCE + SPARSE ENCODE] song song:
+    │
+    ├─ Voyage embed_query (LRU cache 256 keys) → dense vector 1024-dim
+    │     Cùng query string (normalized) trong phiên → trả vector cached, 0ms.
+    │     Vector này REUSE cho cả retriever + conv_memory.
+    │
+    └─ sparse_encoder.encode(query) → BM25 sparse {indices, values}
+          Local-only, ~5-20ms (underthesea cached sau warmup đầu).
+          Skip nếu HYBRID_RETRIEVAL=0.
     │
     ▼
 [RETRIEVE ∥ RECALL] concurrent.futures.ThreadPoolExecutor(max_workers=2)
@@ -566,8 +600,16 @@ User query
     │         → fanout 20 collections song song
     │     • slug/persona không map được → fallback fanout 20 + log warning
     │
-    ├─ retriever.retrieve()  (parallel 2 nguồn khi có domain, 20+vmedia khi chat chung)
-    │    dedup theo prefix text (80 ký tự) + sort theo score
+    ├─ retriever.retrieve()  (hybrid Qdrant Query API mỗi store):
+    │    POST /collections/{col}/points/query với
+    │      prefetch: [
+    │        { query: dense_vec,  using: "dense",  limit: 30 },
+    │        { query: sparse_vec, using: "sparse", limit: 30 }
+    │      ]
+    │      query: { fusion: "rrf" }
+    │    → 1 HTTP call, Qdrant fuse RRF server-side, k=60 default.
+    │    Fallback dense-only nếu sparse_vec rỗng / HYBRID_RETRIEVAL=0.
+    │    dedup theo prefix text (80 ký tự) + sort theo score.
     │
     └─ conv_memory.retrieve() — nếu `should_skip_recall(query) = False`
          skip cho: len < 6, chào hỏi, ack, yes/no
@@ -710,6 +752,185 @@ Parser regex tách ra trường `suggested_questions[]` trong response JSON. Câ
 
 ---
 
+## Hybrid Retrieval (Anthropic Contextual Retrieval recipe)
+
+### Vấn đề được giải quyết
+
+Trước khi có hybrid: query gần như cùng nội dung nhưng khác diễn đạt → retriever cho điểm khác hẳn → câu này đậu, câu kia bị refuse oan. Vd:
+
+| Query | Behavior cũ |
+|---|---|
+| "Danh mục vật tư máng cáp Z" | refusal |
+| "vật tư máng cáp Z" | trả lời đúng + nguồn |
+| "hướng dẫn quy trình báo giá BOQ cho nhân viên kinh doanh và quản lý" | refusal |
+| "quy trình báo giá BOQ cho nhân viên kinh doanh và quản lý" | trả lời đúng |
+
+Nguyên nhân: dense embedding (Voyage) bị filler word ("hướng dẫn", "cho nhân viên") kéo lệch vector về cluster HR/onboarding, miss chunk đúng. Mã sản phẩm/từ hiếm (`BOQ`, `máng cáp`, SKU) cũng bị tokenizer chia nhỏ làm loãng vector.
+
+### Kiến trúc 3 component
+
+```
+┌──────────── INGEST ──────────────┐
+│ chunk → contextual_chunker.py    │   1. Haiku sinh ngữ cảnh (cache_control)
+│         (Anthropic recipe)        │      embed_text = context + chunk.text
+│         ↓                         │
+│         ↓                         │
+│ ┌──────┴──────┐                  │   2. Dual encode song song:
+│ ↓             ↓                  │      • Voyage dense (1024-dim)
+│ Voyage   sparse_encoder.py       │      • BM25 sparse {indices, values}
+│ dense    (underthesea + BM25)    │
+│ ↓             ↓                  │
+│ └──────┬──────┘                  │   3. Qdrant upsert dual-vector
+│        ↓                         │      vector: { dense: [...], sparse: {...} }
+│   Qdrant collection              │      payload: { text, context, ... }
+└──────────────────────────────────┘
+
+┌──────────── QUERY ───────────────┐
+│ query                             │
+│   ├── voyage.embed_query → dense │
+│   └── sparse_encoder.encode      │
+│           → sparse               │
+│   ↓                              │
+│ Qdrant /points/query             │   prefetch[dense, sparse] + RRF fusion
+│   prefetch dense limit=30        │   server-side, k=60
+│   prefetch sparse limit=30       │
+│   query: {fusion: "rrf"}         │
+│   ↓                              │
+│ Top hits (fused)                 │
+│   ↓                              │
+│ BGE-reranker-v2-m3 (đã có)       │
+│   ↓                              │
+│ Claude Citations API             │   chỉ payload.text (không context_prefix)
+└──────────────────────────────────┘
+```
+
+### Component 1 — Contextual Chunking (`app/core/contextual_chunker.py`)
+
+Anthropic công bố Sept 2024: + Contextual Embeddings → **-35% fail rate**, + BM25 → **-49%**, + reranker → **-67%**.
+
+Cách hoạt động:
+- Mỗi chunk → gửi cả tài liệu + chunk đó cho Haiku.
+- Haiku trả 1-2 câu (≤100 từ) đặt chunk vào ngữ cảnh tổng thể.
+- Prepend mô tả vào text trước khi embed/sparse-encode.
+- **Prompt caching** Anthropic ephemeral: doc ≤80k chars trong cache_control block → N-1 chunks sau dùng cache, cost giảm ~85%.
+
+Quan trọng:
+- Context KHÔNG đi vào `payload.text` — chỉ vào `payload.context` riêng.
+- Embed/sparse dùng `embed_text = context + "\n\n" + chunk.text`.
+- Citations API gửi chỉ `chunk.text` → Claude cite đúng câu thật trong tài liệu.
+
+Tắt qua env `CONTEXTUAL_CHUNKING=0` để tiết kiệm Anthropic cost.
+
+### Component 2 — BM25 Sparse Encoder (`app/core/sparse_encoder.py`)
+
+Pipeline tokenize:
+```
+text → underthesea word_tokenize (compound segmentation, 80% accuracy VN)
+     → split compound bằng [^\W_]+ (vật_tư_máng_cáp → vật, tư, máng, cáp)
+     → normalize NFC + lowercase
+     → filter min_len 2 + stopwords VN/EN
+     → FNV-1a 64-bit hash mod 2^24 buckets
+     → SparseVector{indices, values=TF}
+```
+
+Tại sao split compound thành unigram:
+- underthesea ghép compound theo context: cùng "vật tư máng cáp" có thể ra "vật_tư_máng_cáp" trong câu này nhưng "vật_tư_máng cáp" trong câu khác.
+- Nếu giữ compound làm token BM25 → 2 query gần giống ra index khác nhau, mất overlap.
+- Split unigram → cùng "vật, tư, máng, cáp" → BM25 IDF trên rare words ổn định.
+
+IDF do Qdrant tự nhân lúc query (collection schema `sparse_vectors.sparse.modifier="idf"`). Client emit chỉ TF.
+
+Stable hash FNV-1a 64-bit (KHÔNG dùng Python's randomized hash) → cùng token → cùng vocab id bất kỳ process nào, không cần persist vocabulary.
+
+Tắt qua env `HYBRID_RETRIEVAL=0`.
+
+### Component 3 — Qdrant Hybrid Schema
+
+Mỗi collection (20 cái, `tdi_{docs,videos}_{10_domain}`) có schema:
+
+```json
+{
+  "vectors": {
+    "dense": { "size": 1024, "distance": "Cosine", "hnsw_config": {"m":24, "ef_construct":256} }
+  },
+  "sparse_vectors": {
+    "sparse": { "modifier": "idf", "index": {"on_disk": false} }
+  }
+}
+```
+
+Search qua **Qdrant Query API** `/points/query`:
+```json
+{
+  "prefetch": [
+    { "query": [<dense vec>], "using": "dense",  "limit": 30 },
+    { "query": {"indices":[...], "values":[...]}, "using": "sparse", "limit": 30 }
+  ],
+  "query": {"fusion": "rrf"},
+  "limit": 10
+}
+```
+
+→ **1 HTTP call** mỗi collection. Qdrant fuse RRF server-side với `k=60` (default). Fallback dense-only nếu sparse rỗng / `HYBRID_RETRIEVAL=0`.
+
+### Cấu hình env
+
+| Env | Default | Mô tả |
+|---|---|---|
+| `HYBRID_RETRIEVAL` | `1` | Bật BM25 + RRF fusion. Tắt → dense-only via Query API |
+| `CONTEXTUAL_CHUNKING` | `1` | Bật Haiku context prefix. Tắt → embed chunk gốc, không qua Haiku |
+| `BM25_HASH_BUCKETS` | `16777216` (2^24) | Vocab buckets cho FNV hash. Ít khi cần đổi |
+| `HYBRID_PREFETCH_LIMIT` | `30` | Số candidate mỗi nhánh dense/sparse pull trước RRF |
+
+### Test results (2 file PoC)
+
+10 nhóm test (mỗi nhóm 2-3 query biến thể) với corpus = `Form thiết kế.pdf` + `RAG Cookbook.docx`:
+
+| # | Test group | Δ sigmoid | Verdict |
+|---|---|---|---|
+| 1 | Diacritic — có dấu / không dấu | 0.032 | ✓ OK |
+| 2 | Mixed VN+EN — đảo từ, dịch một phần | 0.015 | ✓ OK |
+| 3 | Synonym — "Retrieval Augmented Generation" / "RAG" | 0.188 | ✓ OK |
+| 4 | Term variant — `VOYAGE_API_KEY` / `voyage api key` | 0.008 | ✓ OK |
+| 5 | Question vs declarative | 0.070 | ✓ OK |
+| 6 | Single word vs phrase — `Chroma` / `ChromaDB` | 0.063 | ✓ OK |
+| 7 | Chat chung (no domain, fanout 20) | 0.017 | ✓ OK |
+| 8 | Negative test (phở bò, cá vàng) | — | ✓ EXPECTED_LOW (0.501) |
+| 9 | Wrong domain (CNTT vào BIM rỗng) | — | ✓ NO HITS |
+| 10 | Long multi-sentence query | 0.011 | ✓ OK |
+
+**PASS: 10/10**.
+
+Files test giữ trong `scripts/`:
+- `test_hybrid_e2e.py` — E2E ingest + 4 query group
+- `test_hybrid_advanced.py` — 10 stress test groups + verdict logic
+- `reset_qdrant_collections.py` — drop + recreate 20 collection khi đổi schema
+
+### Khi nào chạy `reset_qdrant_collections.py`
+
+| Tình huống | Cần reset? |
+|---|---|
+| Lần đầu deploy hybrid lên Qdrant rỗng | KHÔNG — server start tự `ensure_all` tạo schema mới |
+| Lần đầu deploy hybrid lên Qdrant đã có collection schema CŨ (single dense, vector_name="") | **CÓ** — không reset → search trả 400 "Not existing vector name: dense" |
+| Deploy update sau khi đã có hybrid | KHÔNG — schema giữ nguyên |
+
+Chạy 1 dòng từ máy local trỏ vào production Qdrant:
+```bash
+QDRANT_URL=<prod> QDRANT_API_KEY=<key> ./venv/bin/python scripts/reset_qdrant_collections.py
+```
+
+### Rollback
+
+```bash
+# Tắt hybrid — fallback dense-only (vẫn dùng schema mới qua Query API)
+export HYBRID_RETRIEVAL=0
+
+# Tắt contextual chunking — giảm Anthropic cost lúc ingest
+export CONTEXTUAL_CHUNKING=0
+```
+
+---
+
 ## Conversation Memory (Hybrid 3 tầng)
 
 Memory của bot được chia 3 tầng, mỗi tầng bắt 1 scope khác nhau:
@@ -819,9 +1040,19 @@ trungtamtrithuc/
 │   │   │                        #   + _attach_history_cache (cache breakpoint #2)
 │   │   │                        #   + _log_usage (in/cache_write/cache_read/out)
 │   │   ├── voyage_embed.py      # Voyage embedder + LRU query cache + 429 backoff
-│   │   ├── qdrant_store.py      # QdrantStore + QdrantRegistry (20 coll)
+│   │   ├── qdrant_store.py      # QdrantStore + QdrantRegistry (20 coll, hybrid schema)
 │   │   │                        #   + DOMAINS (10 slug) + PERSONA_TO_DOMAIN
-│   │   │                        #   + VMediaReadOnlyStore
+│   │   │                        #   + VMediaReadOnlyStore (legacy single-vector)
+│   │   │                        #   + DENSE/SPARSE_VECTOR_NAME constants
+│   │   │                        #   search() qua /points/query API + RRF fusion
+│   │   ├── sparse_encoder.py    # BM25 sparse encoder cho hybrid retrieval
+│   │   │                        #   underthesea word_tokenize → split unigram
+│   │   │                        #   FNV-1a 64-bit hash → SparseVector{indices,values}
+│   │   │                        #   IDF do Qdrant tự nhân (modifier="idf")
+│   │   ├── contextual_chunker.py    # Anthropic Contextual Retrieval recipe
+│   │   │                            #   Haiku + prompt caching ephemeral
+│   │   │                            #   add_contexts(claude, doc, chunks)
+│   │   │                            #   → ContextualChunk(text, context, embed_text)
 │   │   ├── s3_client.py         # boto3 wrapper cho S3-compatible (AWS/Viettel IDC/MinIO/R2)
 │   │   │                        #   + slugify_domain(), PREFIX_DOCS/PREFIX_VIDEOS
 │   │   ├── session_memory.py    # Sliding window + rolling summary (file JSON)
@@ -868,7 +1099,12 @@ trungtamtrithuc/
 │   ├── clean_poisoned_pairs.py      # Xoá pair "không tìm thấy" khỏi Qdrant
 │   ├── seed_two_users.py            # Seed 2 test user + conv turns
 │   ├── test_conversation_memory.py  # Test 3 tầng hybrid memory
-│   └── test_fix_e2e.py              # E2E test cross-session recall
+│   ├── test_fix_e2e.py              # E2E test cross-session recall
+│   ├── reset_qdrant_collections.py  # Drop + recreate 20 coll với hybrid schema
+│   │                                #   chạy 1 lần khi switch dense-only → hybrid
+│   ├── test_hybrid_e2e.py           # E2E ingest 2 file + test query brittleness
+│   └── test_hybrid_advanced.py      # 10 stress test groups (diacritic, mixed VN+EN,
+│                                    #   synonym, term variant, negative, wrong domain…)
 ├── docs/
 │   ├── PROJECT_OVERVIEW.md      # File này
 │   └── INTEGRATION.md           # Tích hợp FE/BE
@@ -928,6 +1164,59 @@ cp .env.example .env
 | Ingest | `UPLOAD_STREAM_CHUNK` | 1048576 | Chunk size khi stream-to-disk (bytes, default 1MB) |
 | Preview | `PREVIEW_MAX_PAGES` | 5 | Số trang/slide đầu cho `/file/preview` |
 | Preview | `PREVIEW_VIDEO_CLIP_SEC` | 180 | Số giây đầu video cho `/video/file/preview` |
+| Hybrid | `HYBRID_RETRIEVAL` | 1 | Bật BM25 + RRF fusion. Tắt → dense-only |
+| Hybrid | `CONTEXTUAL_CHUNKING` | 1 | Bật Haiku context prefix lúc ingest. Tắt → tiết kiệm Anthropic cost |
+| Hybrid | `BM25_HASH_BUCKETS` | 16777216 | Vocab buckets cho FNV hash (2^24). Ít khi cần đổi |
+| Hybrid | `HYBRID_PREFETCH_LIMIT` | 30 | Số candidate mỗi nhánh dense/sparse pull trước RRF |
+
+### Migration schema khi deploy hybrid lần đầu
+
+Code hybrid yêu cầu Qdrant collection có schema `dense + sparse` (không tương thích schema cũ single dense `vector_name=""`).
+
+**Tình huống và xử lý:**
+
+| Trạng thái Qdrant | Cần làm gì? |
+|---|---|
+| Qdrant rỗng (chưa có collection nào) | Không cần gì — server start tự `ensure_all` tạo schema mới |
+| Qdrant có collection schema CŨ | Chạy `scripts/reset_qdrant_collections.py` 1 lần (xoá + tạo lại) |
+| Qdrant đã có schema hybrid | Không cần gì |
+
+**Script reset (chạy từ máy local trỏ vào production Qdrant — không cần SSH):**
+
+```bash
+QDRANT_URL=<prod-url> QDRANT_API_KEY=<prod-key> \
+  ./venv/bin/python scripts/reset_qdrant_collections.py
+```
+
+Output kỳ vọng:
+```
+[1/2] Deleting old collections…   (20 dòng)
+[2/2] Recreating with hybrid schema (dense + sparse)…   (20 dòng)
+QdrantRegistry.ensure_all: 20/20 collections ensured.
+DONE.
+```
+
+⚠️ **CẢNH BÁO**: script DELETE toàn bộ chunk data trong 20 collection. Backup nếu có data quan trọng.
+
+**Check schema hiện tại trước khi reset:**
+
+```bash
+QDRANT_URL=<prod> QDRANT_API_KEY=<key> ./venv/bin/python -c "
+import os, requests
+url, key = os.environ['QDRANT_URL'].rstrip('/'), os.environ['QDRANT_API_KEY']
+r = requests.get(f'{url}/collections/tdi_docs_marketing', headers={'api-key': key}, timeout=10)
+if r.status_code == 404:
+    print('EMPTY: chưa có collection — không cần reset')
+else:
+    p = r.json()['result']['config']['params']
+    has_dense = 'dense' in p.get('vectors', {})
+    has_sparse = 'sparse' in p.get('sparse_vectors', {})
+    if has_dense and has_sparse:
+        print('HYBRID OK: schema đã đúng')
+    else:
+        print('LEGACY: PHẢI chạy reset script')
+"
+```
 
 ### Truy cập
 
@@ -968,8 +1257,10 @@ cp .env.example .env
 | LLM trả lời | Claude Sonnet 4 (`claude-sonnet-4-20250514`) |
 | LLM Vision / Describe table / Rewrite / Metadata | Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) |
 | Prompt caching | Anthropic ephemeral cache — 2 breakpoint (system + history) |
-| Embedding | Voyage AI `voyage-3` — 1024-dim, LRU cache 256 keys |
-| Vector DB | Qdrant Cloud (2 cluster: main + vmedia read-only) |
+| Embedding (dense) | Voyage AI `voyage-3` — 1024-dim, LRU cache 256 keys |
+| Sparse retrieval (BM25) | underthesea (VN word segment, accuracy 80%) + FNV-1a hash → SparseVector |
+| Contextual chunking | Anthropic Contextual Retrieval recipe — Haiku + prompt caching ephemeral |
+| Vector DB | Qdrant Cloud — hybrid schema (dense + sparse IDF) qua Query API + RRF fusion |
 | PDF parser | Docling (IBM) → Claude Vision → pdfplumber |
 | PDF → image | pdf2image + poppler |
 | PDF preview truncation | pypdf (cắt N trang đầu trước Docling) |

@@ -57,6 +57,14 @@ ENABLE_RERANKING: bool = _opt("ENABLE_RERANKING", "true").lower() == "true"
 RERANK_SKIP_THRESHOLD: float = float(_opt("RERANK_SKIP_THRESHOLD", "0.85"))
 ENABLE_QUERY_REWRITE: bool = _opt("ENABLE_QUERY_REWRITE", "true").lower() == "true"
 
+# --- Hybrid retrieval (Anthropic Contextual Retrieval recipe) ---
+# Mirror các flag ở app/config.py để ingestion module (dùng app.core.config)
+# truy cập được. Tắt env → fallback dense-only / no-context.
+HYBRID_RETRIEVAL: bool = _opt("HYBRID_RETRIEVAL", "1").strip().lower() not in ("0", "false", "no", "off")
+CONTEXTUAL_CHUNKING: bool = _opt("CONTEXTUAL_CHUNKING", "1").strip().lower() not in ("0", "false", "no", "off")
+BM25_HASH_BUCKETS: int = int(_opt("BM25_HASH_BUCKETS", str(1 << 24)))
+HYBRID_PREFETCH_LIMIT: int = int(_opt("HYBRID_PREFETCH_LIMIT", "30"))
+
 # --- API server ---
 API_HOST: str = _opt("API_HOST", "0.0.0.0")
 API_PORT: int = int(_opt("API_PORT", "8000"))

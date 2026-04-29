@@ -41,6 +41,21 @@ CHUNK_OVERLAP_TOKENS: int = int(os.getenv("CHUNK_OVERLAP_TOKENS", "80"))
 TOP_K: int = int(os.getenv("TOP_K", "7"))
 RERANK_TOP_K: int = int(os.getenv("RERANK_TOP_K", "5"))
 
+# Hybrid retrieval (Anthropic Contextual Retrieval recipe).
+# - HYBRID_RETRIEVAL: bật dual vector dense (Voyage) + sparse (BM25 + underthesea)
+#   trong Qdrant, fuse RRF server-side qua /points/query API. Mặc định ON;
+#   tắt (=0) để rollback về dense-only nếu hybrid lỗi.
+# - CONTEXTUAL_CHUNKING: bật Haiku-generated context prefix cho mỗi chunk
+#   trước khi embed/sparse-encode. Anthropic recipe: -49% fail rate kèm BM25.
+# - BM25_HASH_BUCKETS: số buckets cho stable hash token → vocab id. 2^24 = 16M
+#   đủ cho corpus < 1M unique tokens với rate collision < 1%.
+HYBRID_RETRIEVAL: bool = os.getenv("HYBRID_RETRIEVAL", "1").strip().lower() not in ("0", "false", "no", "off")
+CONTEXTUAL_CHUNKING: bool = os.getenv("CONTEXTUAL_CHUNKING", "1").strip().lower() not in ("0", "false", "no", "off")
+BM25_HASH_BUCKETS: int = int(os.getenv("BM25_HASH_BUCKETS", str(1 << 24)))
+# RRF prefetch limit per branch — mỗi nhánh dense/sparse pull tối đa N candidate
+# rồi Qdrant fuse. 30 đủ rộng để chunk đúng lọt qua nhưng không quá nhiều noise.
+HYBRID_PREFETCH_LIMIT: int = int(os.getenv("HYBRID_PREFETCH_LIMIT", "30"))
+
 # API
 API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
 API_PORT: int = int(os.getenv("API_PORT", "8000"))

@@ -32,3 +32,6 @@ sentence-transformers
 transformers
 pytest-asyncio
 boto3
+# Hybrid retrieval — Vietnamese word segmentation cho BM25 sparse vectors.
+# underthesea: 80% accuracy (vs pyvi 58%), pure Python, active maintain.
+underthesea>=6.8.0

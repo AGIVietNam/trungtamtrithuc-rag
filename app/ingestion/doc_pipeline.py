@@ -8,7 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core import config
+from app.core import sparse_encoder
 from app.core.chunker import chunk_text
+from app.core.claude_client import ClaudeClient
+from app.core.contextual_chunker import add_contexts
 from app.core.voyage_embed import VoyageEmbedder
 from app.core.qdrant_store import QdrantStore, QdrantRegistry, PERSONA_TO_DOMAIN, DOMAINS
 from app.ingestion.doc_parser import parse, _fix_common_typos
@@ -77,9 +80,22 @@ def _get_registry() -> QdrantRegistry:
             url=config.QDRANT_URL,
             api_key=config.QDRANT_API_KEY,
             vector_size=config.VOYAGE_DIM,
-            vector_name=getattr(config, "QDRANT_VECTOR_NAME", ""),
         )
     return _registry
+
+
+_claude_client: ClaudeClient | None = None
+
+
+def _get_claude_for_context() -> ClaudeClient:
+    """Singleton ClaudeClient cho contextual chunking — Haiku model."""
+    global _claude_client
+    if _claude_client is None:
+        _claude_client = ClaudeClient(
+            api_key=config.ANTHROPIC_API_KEY,
+            model=config.CLAUDE_HAIKU_MODEL,
+        )
+    return _claude_client
 
 
 def _resolve_domain_store(metadata: dict | None, source: str) -> QdrantStore:
@@ -304,6 +320,13 @@ def ingest_document(
     num_pages = len(page_texts)
     embedder = VoyageEmbedder(api_key=config.VOYAGE_API_KEY, model=config.VOYAGE_MODEL)
 
+    # Full doc text: dùng cho contextual chunking (Anthropic recipe). Concat tất
+    # cả page text — Haiku sẽ thấy toàn cảnh tài liệu khi sinh ngữ cảnh cho
+    # mỗi chunk. Prompt caching giữ doc cache trong 5 phút TTL → các chunk
+    # sau hit cache.
+    full_doc_text = "\n\n".join(t for _, t in page_texts if t and t.strip())
+    claude_for_ctx = _get_claude_for_context() if config.CONTEXTUAL_CHUNKING else None
+
     all_points: list[dict] = []
     chunk_index = 0
 
@@ -322,10 +345,27 @@ def ingest_document(
         if not chunks:
             continue
 
-        texts = [c.text for c in chunks]
-        vectors = embedder.embed_documents(texts)
+        # Contextual chunking — sinh prefix ngữ cảnh cho mỗi chunk dựa trên
+        # toàn doc. Nếu disabled → trả ContextualChunk(text=t, context="", embed_text=t).
+        chunk_texts_raw = [c.text for c in chunks]
+        if claude_for_ctx is not None:
+            ctxs = add_contexts(claude_for_ctx, full_doc_text, chunk_texts_raw)
+        else:
+            from app.core.contextual_chunker import ContextualChunk
+            ctxs = [ContextualChunk(text=t, context="", embed_text=t) for t in chunk_texts_raw]
 
-        for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+        # Embed dùng augmented text (context + chunk). Voyage không phân biệt —
+        # embedding sẽ phản ánh cả ngữ cảnh và nội dung chunk.
+        embed_inputs = [c.embed_text for c in ctxs]
+        vectors = embedder.embed_documents(embed_inputs)
+
+        # Sparse encode CHỈ nếu hybrid bật. Encode local nên rẻ.
+        if config.HYBRID_RETRIEVAL:
+            sparse_vecs = sparse_encoder.encode_batch(embed_inputs)
+        else:
+            sparse_vecs = [None] * len(ctxs)
+
+        for i, (chunk, ctx, vector, sparse_vec) in enumerate(zip(chunks, ctxs, vectors, sparse_vecs)):
             point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}-{chunk_index}"))
             payload: dict = {
                 "source_type": "document",
@@ -333,10 +373,16 @@ def ingest_document(
                 "source_name": original_name,
                 "page": page_num,
                 "chunk_index": chunk_index,
+                # ``text``: chunk gốc — vào Citations API. KHÔNG gồm context_prefix
+                # để Claude cite đúng câu thật trong tài liệu, không cite text
+                # tổng hợp do Haiku sinh ra.
                 "text": chunk.text,
                 "heading_path": chunk.heading_path,
                 "uploaded_at": uploaded_at,
             }
+            # Lưu context riêng — debug only, không ảnh hưởng search/citations.
+            if ctx.context:
+                payload["context"] = ctx.context
             if table_data and i == 0:
                 payload["table_data"] = table_data
             # Store searchable metadata fields at top level
@@ -352,11 +398,17 @@ def ingest_document(
                 if metadata.get("url"):
                     payload["url"] = metadata["url"]
                 payload["extra_metadata"] = metadata
-            all_points.append({"id": point_id, "vector": vector, "payload": payload})
+            all_points.append({
+                "id": point_id,
+                "vector": vector,
+                "sparse": sparse_vec,
+                "payload": payload,
+            })
             chunk_index += 1
 
-        logger.info("Page %d: %d chunks, table_data=%s, vision=%s",
-                     page_num, len(chunks), bool(table_data), needs_vision)
+        logger.info("Page %d: %d chunks, table_data=%s, vision=%s, contextual=%s, sparse=%s",
+                     page_num, len(chunks), bool(table_data), needs_vision,
+                     config.CONTEXTUAL_CHUNKING, config.HYBRID_RETRIEVAL)
 
     store.upsert(all_points)
     logger.info("Ingested %s: doc_id=%s pages=%d chunks=%d",

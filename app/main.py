@@ -27,15 +27,14 @@ async def _lifespan(app: FastAPI):
         # Idempotent: chỉ tạo collection nếu chưa tồn tại, không xóa data cũ.
         # Lần đầu deploy: tạo đủ 24. Restart sau: skip (collection đã có).
         try:
-            from app.config import QDRANT_URL, QDRANT_API_KEY, VOYAGE_DIM, QDRANT_VECTOR_NAME
+            from app.config import QDRANT_URL, QDRANT_API_KEY, VOYAGE_DIM
             from app.core.qdrant_store import QdrantRegistry
             registry = QdrantRegistry(
                 url=QDRANT_URL,
                 api_key=QDRANT_API_KEY,
                 vector_size=VOYAGE_DIM,
-                vector_name=QDRANT_VECTOR_NAME,
             )
-            registry.ensure_all()   # tạo đủ 24 collections, log tên từng cái
+            registry.ensure_all()   # tạo đủ 20 collections (hybrid: dense+sparse)
         except Exception as e:
             print(f"QdrantRegistry.ensure_all failed: {e}")
 
@@ -51,7 +50,7 @@ async def _lifespan(app: FastAPI):
         # Chain sẽ dùng registry để route search đúng collection theo domain.
         try:
             from app.api.chat import _get_chain
-            from app.config import QDRANT_URL, QDRANT_API_KEY, VOYAGE_DIM, QDRANT_VECTOR_NAME
+            from app.config import QDRANT_URL, QDRANT_API_KEY, VOYAGE_DIM
             from app.core.qdrant_store import QdrantRegistry
 
             chain = _get_chain()
@@ -59,9 +58,8 @@ async def _lifespan(app: FastAPI):
                 url=QDRANT_URL,
                 api_key=QDRANT_API_KEY,
                 vector_size=VOYAGE_DIM,
-                vector_name=QDRANT_VECTOR_NAME,
             )
-            print("chain.retriever.registry injected: 24 collections ready")
+            print("chain.retriever.registry injected: 20 collections ready (hybrid)")
         except Exception as e:
             print(f"chain registry inject failed: {e}")
 

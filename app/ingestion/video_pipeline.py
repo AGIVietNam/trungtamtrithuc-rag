@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core import config
+from app.core import sparse_encoder
 from app.core.chunker import chunk_transcript_with_timestamps
+from app.core.claude_client import ClaudeClient
+from app.core.contextual_chunker import ContextualChunk, add_contexts
 from app.core.voyage_embed import VoyageEmbedder
 from app.core.qdrant_store import QdrantStore, QdrantRegistry, PERSONA_TO_DOMAIN, DOMAINS
 
@@ -25,9 +28,21 @@ def _get_registry() -> QdrantRegistry:
             url=config.QDRANT_URL,
             api_key=config.QDRANT_API_KEY,
             vector_size=config.VOYAGE_DIM,
-            vector_name=getattr(config, "QDRANT_VECTOR_NAME", ""),
         )
     return _registry
+
+
+_claude_client: ClaudeClient | None = None
+
+
+def _get_claude_for_context() -> ClaudeClient:
+    global _claude_client
+    if _claude_client is None:
+        _claude_client = ClaudeClient(
+            api_key=config.ANTHROPIC_API_KEY,
+            model=config.CLAUDE_HAIKU_MODEL,
+        )
+    return _claude_client
 
 
 def _resolve_domain_store(metadata: dict | None) -> QdrantStore:
@@ -118,10 +133,24 @@ def _upsert_video_chunks(
     embedder = VoyageEmbedder(api_key=config.VOYAGE_API_KEY, model=config.VOYAGE_MODEL)
 
     texts = [c["text"] for c in chunks]
-    vectors = embedder.embed_documents(texts)
+
+    # Contextual chunking — gửi full transcript cho Haiku để sinh ngữ cảnh
+    # cho mỗi chunk (vd: "Đoạn này thuộc phần demo BKVN").
+    full_transcript = "\n\n".join(texts)
+    if config.CONTEXTUAL_CHUNKING:
+        ctxs = add_contexts(_get_claude_for_context(), full_transcript, texts)
+    else:
+        ctxs = [ContextualChunk(text=t, context="", embed_text=t) for t in texts]
+
+    embed_inputs = [c.embed_text for c in ctxs]
+    vectors = embedder.embed_documents(embed_inputs)
+    if config.HYBRID_RETRIEVAL:
+        sparse_vecs = sparse_encoder.encode_batch(embed_inputs)
+    else:
+        sparse_vecs = [None] * len(ctxs)
 
     points: list[dict] = []
-    for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+    for i, (chunk, ctx, vector, sparse_vec) in enumerate(zip(chunks, ctxs, vectors, sparse_vecs)):
         start_sec = chunk["start"]
         end_sec = chunk["end"]
         ts_start = int(start_sec)
@@ -161,7 +190,14 @@ def _upsert_video_chunks(
                 val = playlist_info.get(key)
                 if val:
                     payload[key] = val
-        points.append({"id": point_id, "vector": vector, "payload": payload})
+        if ctx.context:
+            payload["context"] = ctx.context
+        points.append({
+            "id": point_id,
+            "vector": vector,
+            "sparse": sparse_vec,
+            "payload": payload,
+        })
 
     store.upsert(points)
     logger.info(
