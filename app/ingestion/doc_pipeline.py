@@ -201,6 +201,42 @@ def _llm_describe_table(table_md: str) -> str:
         return ""
 
 
+_TABLE_SEP_RE = re.compile(r"^\s*\|[\s\-:|]+\|\s*$")
+
+
+def _table_to_linear_text(table_md: str) -> str:
+    """Fallback deterministic khi LLM mô tả bảng fail / rate-limit / no key.
+
+    Convert markdown rows → mỗi data row 1 dòng 'header: cell | header: cell'.
+    Mục tiêu chính: đảm bảo nội dung bảng KHÔNG biến mất khỏi index, cả khi
+    page chỉ chứa duy nhất 1 bảng (text_part rỗng) → embed_text rỗng → 0 chunk.
+
+    Output thô (không phải tiếng Việt tự nhiên), nhưng đủ keyword cho retrieval
+    BM25/dense — tốt hơn nhiều so với mất hẳn dữ liệu.
+    """
+    lines = [
+        line.strip() for line in table_md.split("\n")
+        if line.strip().startswith("|") and line.strip().endswith("|")
+        and not _TABLE_SEP_RE.match(line)
+    ]
+    if not lines:
+        return ""
+    rows = [[cell.strip() for cell in line.strip("|").split("|")] for line in lines]
+    if len(rows) < 2:
+        return ""
+    headers = rows[0]
+    out: list[str] = []
+    for row in rows[1:]:
+        parts: list[str] = []
+        for header, cell in zip(headers, row):
+            if not cell:
+                continue
+            parts.append(f"{header}: {cell}" if header else cell)
+        if parts:
+            out.append(" | ".join(parts))
+    return "\n".join(out)
+
+
 def _vision_with_context(pdf_path: Path, context_text: str) -> str:
     """Vision for PDF pages with document context."""
     from app.ingestion.doc_parser import (
@@ -269,7 +305,16 @@ def _process_content(text: str) -> tuple[str, str, bool]:
     table_data = "\n\n".join(good_tables)
     table_desc = _llm_describe_table(table_data) if good_tables else ""
 
-    parts = [p for p in [text_part, table_desc] if p]
+    # (D) Linear text bảo toàn keyword/exact phrase từ bảng — Haiku summary
+    # hay paraphrase ('copy và chỉnh sửa' thay vì 'Copy từ bản vẽ thiết kế'),
+    # mất khả năng BM25 match. Linear text giữ nguyên cell text → vừa
+    # cứu data loss khi Haiku fail, vừa cải thiện retrieval keyword.
+    table_linear = _table_to_linear_text(table_data) if good_tables else ""
+    if good_tables and not table_desc:
+        logger.info("LLM table describe empty → using linear text only (%d chars)",
+                    len(table_linear))
+
+    parts = [p for p in [text_part, table_desc, table_linear] if p]
     embed_text = "\n\n".join(parts)
 
     return embed_text, table_data, needs_vision
