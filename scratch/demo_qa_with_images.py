@@ -57,7 +57,6 @@ _voyage = VoyageEmbedder(api_key=config.VOYAGE_API_KEY, model=config.VOYAGE_MODE
 _registry = QdrantRegistry(
     url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY,
     vector_size=config.VOYAGE_DIM,
-    vector_name=config.QDRANT_VECTOR_NAME,
 )
 _vmedia = VMediaReadOnlyStore(
     url=config.QDRANT_VMEDIA_URL,

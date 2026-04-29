@@ -41,7 +41,7 @@ def main() -> int:
 
     from app.core.config import (
         VOYAGE_API_KEY, QDRANT_URL, QDRANT_API_KEY,
-        VOYAGE_MODEL, VOYAGE_DIM, QDRANT_VECTOR_NAME,
+        VOYAGE_MODEL, VOYAGE_DIM,
         QDRANT_VMEDIA_URL, QDRANT_VMEDIA_API_KEY, VMEDIA_COLLECTIONS,
     )
     for name, val in [("VOYAGE_API_KEY", VOYAGE_API_KEY),
@@ -74,7 +74,7 @@ def main() -> int:
     voyage = VoyageEmbedder(api_key=VOYAGE_API_KEY, model=VOYAGE_MODEL)
     registry = QdrantRegistry(
         url=QDRANT_URL, api_key=QDRANT_API_KEY,
-        vector_size=VOYAGE_DIM, vector_name=QDRANT_VECTOR_NAME,
+        vector_size=VOYAGE_DIM,
     )
     vmedia = VMediaReadOnlyStore(
         url=QDRANT_VMEDIA_URL,

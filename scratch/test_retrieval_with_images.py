@@ -1,9 +1,16 @@
-"""E2E test cho DOCX: ingest → upload S3 ảnh → query → verify URL.
+"""E2E test cho PDF: ingest → upload S3 ảnh → query → verify URL.
 
-Chạy giống test_retrieval_with_images.py nhưng nhận file .docx.
+Same pattern as test_docx_e2e.py / test_xlsx_e2e.py — chỉ khác extension.
 
 Usage:
-    venv/bin/python scratch/test_docx_e2e.py docs/test.docx [domain]
+    venv/bin/python scratch/test_retrieval_with_images.py docs/test.pdf [domain]
+
+Output:
+  1. Ingest: doc_id + số chunks + URL ảnh upload S3.
+  2. Retrieve + rerank: top hits với url + caption.
+  → Mở 1 URL trong browser để verify ảnh hiển thị đúng.
+
+Sau khi pass test này, chạy local server (run.sh) để test UX hỏi-trả-ảnh.
 """
 from __future__ import annotations
 
@@ -22,14 +29,14 @@ sys.path.insert(0, str(ROOT))
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("Usage: python scratch/test_docx_e2e.py <docx_path> [domain]")
+        print("Usage: python scratch/test_retrieval_with_images.py <pdf_path> [domain]")
         return 1
 
-    docx_path = Path(sys.argv[1]).resolve()
+    pdf_path = Path(sys.argv[1]).resolve()
     domain = sys.argv[2] if len(sys.argv) >= 3 else "bim"
 
-    if not docx_path.exists() or docx_path.suffix.lower() not in (".docx", ".doc"):
-        print(f"File không tồn tại / không phải .docx: {docx_path}")
+    if not pdf_path.exists() or pdf_path.suffix.lower() != ".pdf":
+        print(f"File không tồn tại / không phải .pdf: {pdf_path}")
         return 1
 
     valid_domains = {"bim", "mep", "marketing", "phap_ly", "san_xuat",
@@ -50,16 +57,16 @@ def main() -> int:
             print(f"❌ {name} chưa set thật.")
             return 1
 
-    print(f"\n=== DOCX E2E test ===")
-    print(f"File:   {docx_path.name}")
+    print(f"\n=== PDF E2E test ===")
+    print(f"File:   {pdf_path.name}")
     print(f"Domain: {domain}\n")
 
     # --- INGEST ---
     print("─── INGEST ────────────────────────────────────────")
     from app.ingestion.doc_pipeline import ingest_document
     result = ingest_document(
-        str(docx_path), docx_path.name,
-        metadata={"domain": domain, "title": docx_path.stem},
+        str(pdf_path), pdf_path.name,
+        metadata={"domain": domain, "title": pdf_path.stem},
     )
     print(f"\n→ doc_id={result.doc_id} pages={result.num_pages} chunks={result.num_chunks}\n")
 
@@ -83,11 +90,9 @@ def main() -> int:
     retriever = Retriever(voyage=voyage, registry=registry, vmedia_store=vmedia)
     reranker = CrossEncoderReranker(min_score=0.0)
 
-    # Default queries — chung chung, áp dụng cho mọi DOCX. User custom nếu cần
-    # qua argv. Hỏi caption-specific để verify image_caption chunk thắng.
     queries = [
         "Tài liệu này nói về chủ đề gì?",
-        "Có hình ảnh hoặc sơ đồ nào trong tài liệu không?",
+        "Có hình ảnh, biểu đồ hoặc sơ đồ nào trong tài liệu không?",
     ]
 
     for q_idx, query in enumerate(queries, 1):
@@ -116,7 +121,8 @@ def main() -> int:
                 print(f"│          url: {img.get('url', '(no url)')}")
         print(f"└──")
 
-    print(f"\n=== Done. Mở 1 URL trong browser để verify ảnh DOCX upload S3 OK. ===")
+    print(f"\n=== Done. Mở 1 URL trong browser để verify ảnh upload S3 OK. ===")
+    print(f"=== Sau đó chạy local server (run.sh) → test hỏi-trả-ảnh trên UI. ===")
     return 0
 
 

@@ -1008,6 +1008,68 @@ def _convert_doc_to_docx(src: Path) -> Path | None:
     return converted
 
 
+def _convert_office_to_pdf(src: Path, label: str) -> Path | None:
+    """Convert PPTX/PPT/DOCX → PDF qua LibreOffice headless.
+
+    Dùng cho Plan B PPTX (mỗi slide = 1 page PDF → render PNG). Tương tự
+    `_convert_doc_to_docx` nhưng output `.pdf`. Cùng timeout, cùng error path.
+
+    `label` chỉ để log dễ đọc (vd "PPTX") — không ảnh hưởng logic.
+    """
+    soffice = _find_soffice()
+    if not soffice:
+        logger.error(
+            "Không convert được %s → PDF: LibreOffice chưa cài. "
+            "Cần `apt-get install libreoffice`.", label,
+        )
+        return None
+
+    import subprocess
+    import tempfile
+
+    out_dir = Path(tempfile.mkdtemp(prefix=f"{label.lower()}2pdf_"))
+    try:
+        result = subprocess.run(
+            [
+                soffice, "--headless", "--convert-to", "pdf",
+                "--outdir", str(out_dir), str(src),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_DOC_CONVERT_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "soffice timeout (>%ds) khi convert %s → PDF: %s",
+            _DOC_CONVERT_TIMEOUT_SEC, label, src.name,
+        )
+        return None
+    except Exception:
+        logger.exception("soffice subprocess failed for %s → PDF", src.name)
+        return None
+
+    if result.returncode != 0:
+        logger.error(
+            "soffice exit %d cho %s → PDF: %s",
+            result.returncode, src.name, (result.stderr or "").strip(),
+        )
+        return None
+
+    converted = out_dir / f"{src.stem}.pdf"
+    if not converted.exists():
+        candidates = list(out_dir.glob("*.pdf"))
+        if not candidates:
+            logger.error("soffice không sinh ra PDF cho %s", src.name)
+            return None
+        converted = candidates[0]
+
+    logger.info(
+        "Convert %s → PDF: %s → %s (%d bytes)",
+        label, src.name, converted.name, converted.stat().st_size,
+    )
+    return converted
+
+
 def parse_docx(
     path: Path,
     doc_id: str = "",
