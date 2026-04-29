@@ -1225,6 +1225,7 @@ async def ingest_from_url(payload: FromUrlRequest = Body(...)) -> JobSubmitRespo
             job_type="youtube",
             filename=resolved.download_url,
             metadata={"is_playlist": is_playlist, "source": resolved.source},
+            document_id=payload.document_id,
         )
         await runner.submit(job, payload={
             "url": resolved.download_url,
@@ -1244,6 +1245,7 @@ async def ingest_from_url(payload: FromUrlRequest = Body(...)) -> JobSubmitRespo
         job_type=job_type,
         filename=filename,
         metadata={"source": resolved.source, "kind": resolved.kind},
+        document_id=payload.document_id,
     )
     await runner.submit(job, payload={
         "download_url": resolved.download_url,
@@ -1296,6 +1298,7 @@ async def ingest_from_urls(payload: FromUrlsRequest = Body(...)) -> BatchSubmitR
             job_type=job_type,
             filename=item.filename,
             batch_id=batch_id,
+            document_id=item.document_id,
         )
         await runner.submit(job, payload={
             "download_url": item.download_url,

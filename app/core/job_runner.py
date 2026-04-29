@@ -103,6 +103,7 @@ class JobRunner:
             # Notify webhook nếu submitter đăng ký callback_url. Best-effort:
             # callback fail KHÔNG đổi job status (job đã done/failed thì vẫn vậy).
             await self._notify_callback(job_id, payload)
+            await self._notify_backend_document_webhook(job_id)
 
     async def _notify_callback(self, job_id: str, payload: dict[str, Any]) -> None:
         callback_url = payload.get("callback_url")
@@ -121,6 +122,7 @@ class JobRunner:
             "pages": job.pages,
             "error": job.error,
             "duration_sec": (job.finished_at or 0) - (job.started_at or job.created_at),
+            "document_id": job.document_id,
             "metadata": job.metadata,
         }
         try:
@@ -134,6 +136,53 @@ class JobRunner:
         except Exception as exc:
             # Không retry — BE phải design nhận lại qua poll /jobs/{id} nếu webhook miss.
             logger.warning("Callback failed for job %s: %s", job_id, exc)
+
+    async def _notify_backend_document_webhook(self, job_id: str) -> None:
+        """POST {document_id, status} sang BE document webhook khi terminal.
+
+        BE truyền `document_id` lúc submit (`/api/ingest/from-url`); AI giữ trong
+        JobStatus và bắn lại để BE đánh dấu document `success`/`failed`.
+        Skip nếu job không có `document_id` (flow upload không qua BE).
+        Best-effort — webhook fail không đổi trạng thái job nội bộ.
+        """
+        from app.config import BACKEND_DOCUMENT_WEBHOOK_URL, BACKEND_WEBHOOK_API_KEY
+
+        job = await self._store.get(job_id)
+        if job is None or not job.document_id:
+            return
+        if job.status not in ("done", "failed"):
+            return
+        if not BACKEND_DOCUMENT_WEBHOOK_URL or not BACKEND_WEBHOOK_API_KEY:
+            logger.warning(
+                "BE webhook skip for document_id=%s — chưa cấu hình "
+                "BACKEND_DOCUMENT_WEBHOOK_URL hoặc BACKEND_WEBHOOK_API_KEY",
+                job.document_id,
+            )
+            return
+
+        body = {
+            "document_id": job.document_id,
+            "status": "success" if job.status == "done" else "failed",
+        }
+        headers = {
+            "x-api-key": BACKEND_WEBHOOK_API_KEY,
+            "Content-Type": "application/json",
+            "accept": "*/*",
+        }
+        try:
+            timeout = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    BACKEND_DOCUMENT_WEBHOOK_URL, json=body, headers=headers,
+                )
+                logger.info(
+                    "BE webhook for document_id=%s status=%s → HTTP %d",
+                    job.document_id, body["status"], resp.status_code,
+                )
+        except Exception as exc:
+            logger.warning(
+                "BE webhook failed for document_id=%s: %s", job.document_id, exc,
+            )
 
     # --- Handlers ---
 

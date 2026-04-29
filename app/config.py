@@ -105,3 +105,10 @@ UPLOAD_STREAM_CHUNK: int = int(os.getenv("UPLOAD_STREAM_CHUNK", str(1 << 20)))  
 PREVIEW_MAX_PAGES: int = int(os.getenv("PREVIEW_MAX_PAGES", "5"))
 # Số giây đầu video transcribe để gen metadata preview
 PREVIEW_VIDEO_CLIP_SEC: int = int(os.getenv("PREVIEW_VIDEO_CLIP_SEC", "180"))
+
+# --- Backend document webhook ---
+# AI POST {document_id, status} sang BE khi ingest job đạt terminal (done/failed).
+# BE truyền `document_id` xuống cùng `from-url` payload; nếu trống thì bỏ qua call.
+# Cấu hình BẮT BUỘC ở .env (BACKEND_DOCUMENT_WEBHOOK_URL + BACKEND_WEBHOOK_API_KEY).
+BACKEND_DOCUMENT_WEBHOOK_URL: str = os.getenv("BACKEND_DOCUMENT_WEBHOOK_URL", "")
+BACKEND_WEBHOOK_API_KEY: str = os.getenv("BACKEND_WEBHOOK_API_KEY", "")
