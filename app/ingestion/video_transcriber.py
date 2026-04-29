@@ -44,6 +44,33 @@ def _extract_audio(video_path: Path) -> Path:
     return audio_path
 
 
+def _clip_media(src: Path, duration_sec: int) -> Path:
+    """Cắt N giây đầu của video/audio bằng ffmpeg stream-copy (không re-encode).
+
+    Nhanh ~1s với mọi kích thước file. Trả về temp file cùng đuôi với src.
+    """
+    import subprocess
+    import tempfile
+
+    suffix = src.suffix or ".mp4"
+    clip_path = Path(tempfile.mktemp(suffix=suffix))
+    cmd = [
+        "ffmpeg", "-ss", "0", "-i", str(src),
+        "-t", str(int(duration_sec)),
+        "-c", "copy", "-y", str(clip_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        clip_path.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg clip failed: {result.stderr[:500]}")
+    logger.info(
+        "Clipped first %ds of %s → %s (%.1f MB)",
+        duration_sec, src.name, clip_path.name,
+        clip_path.stat().st_size / 1024 / 1024,
+    )
+    return clip_path
+
+
 _GROQ_MAX_SIZE = 24 * 1024 * 1024  # 24MB safe limit
 
 
@@ -54,13 +81,23 @@ class GroqTranscriber:
         self.api_key = api_key
         self.language = language
 
-    def transcribe(self, path: str | Path) -> dict:
+    def transcribe(self, path: str | Path, clip_duration_sec: int | None = None) -> dict:
         from groq import Groq
 
         client = Groq(api_key=self.api_key)
         path = Path(path)
 
         logger.info("Groq Whisper: transcribing %s", path.name)
+
+        # Preview mode: cắt N giây đầu trước khi transcribe — tiết kiệm cost + thời gian
+        # khi chỉ cần đoạn đầu để gen metadata. Clip xoá ở finally.
+        clip_path: Path | None = None
+        if clip_duration_sec and clip_duration_sec > 0:
+            try:
+                clip_path = _clip_media(path, clip_duration_sec)
+                path = clip_path
+            except Exception as exc:
+                logger.warning("Clip failed (%s) — fallback to full transcribe", exc)
 
         # Extract audio if file is too large or is a video format
         send_path = path
@@ -85,6 +122,8 @@ class GroqTranscriber:
         finally:
             if extracted:
                 send_path.unlink(missing_ok=True)
+            if clip_path is not None:
+                clip_path.unlink(missing_ok=True)
 
         segments = []
         for seg in result.segments or []:
@@ -129,24 +168,38 @@ class WhisperTranscriber:
         logger.info("Loaded Whisper model '%s' on %s", self.model_name, self._device)
         return self._model
 
-    def transcribe(self, path: str | Path) -> dict:
+    def transcribe(self, path: str | Path, clip_duration_sec: int | None = None) -> dict:
         model = self._load_model()
+        path = Path(path)
+
+        clip_path: Path | None = None
+        if clip_duration_sec and clip_duration_sec > 0:
+            try:
+                clip_path = _clip_media(path, clip_duration_sec)
+                path = clip_path
+            except Exception as exc:
+                logger.warning("Clip failed (%s) — fallback to full transcribe", exc)
+
         # MPS với fp16 gây hallucination, chỉ dùng fp16 cho CUDA
         fp16 = self._device == "cuda"
-        result = model.transcribe(
-            str(path),
-            verbose=False,
-            language=self.language,
-            fp16=fp16,
-            initial_prompt=(
-                "Đây là video tiếng Việt có dấu đầy đủ. "
-                "Vui lòng ghi chính xác dấu thanh và dấu mũ tiếng Việt."
-            ),
-            condition_on_previous_text=True,
-            temperature=0.0,
-            beam_size=5,
-            best_of=5,
-        )
+        try:
+            result = model.transcribe(
+                str(path),
+                verbose=False,
+                language=self.language,
+                fp16=fp16,
+                initial_prompt=(
+                    "Đây là video tiếng Việt có dấu đầy đủ. "
+                    "Vui lòng ghi chính xác dấu thanh và dấu mũ tiếng Việt."
+                ),
+                condition_on_previous_text=True,
+                temperature=0.0,
+                beam_size=5,
+                best_of=5,
+            )
+        finally:
+            if clip_path is not None:
+                clip_path.unlink(missing_ok=True)
         segments = [
             {
                 "start": round(float(s["start"]), 3),

@@ -69,7 +69,22 @@ async def _lifespan(app: FastAPI):
         await asyncio.to_thread(_warmup)
     except Exception as e:
         print(f"Warmup task failed: {e}")
+
+    # ── 5. Start async ingest worker pool ─────────────────────────────────────
+    try:
+        from app.core.job_runner import get_runner
+        await get_runner().start()
+    except Exception as e:
+        print(f"JobRunner start failed: {e}")
+
     yield
+
+    # ── Shutdown ──────────────────────────────────────────────────────────────
+    try:
+        from app.core.job_runner import get_runner
+        await get_runner().stop()
+    except Exception as e:
+        print(f"JobRunner stop failed: {e}")
 
 
 app = FastAPI(title="Trung Tâm Tri Thức", version="1.0.0", lifespan=_lifespan)
@@ -107,6 +122,12 @@ app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 async def health() -> dict:
     return {"status": "ok"}
 
+
+try:
+    from app.config import UPLOAD_DIR
+    app.mount("/files", StaticFiles(directory=str(UPLOAD_DIR)), name="files")
+except Exception:
+    pass
 
 try:
     app.mount("/", StaticFiles(directory="web", html=True), name="static")

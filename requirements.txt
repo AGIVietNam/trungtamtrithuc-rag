@@ -12,6 +12,7 @@ voyageai
 pdfplumber
 pdf2image
 pymupdf
+pypdf
 docling
 openpyxl
 pandas

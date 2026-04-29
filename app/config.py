@@ -87,3 +87,21 @@ UPLOAD_DIR = BASE_DIR / "data" / "uploads"
 LOG_DIR = BASE_DIR / "data" / "logs"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# --- Async ingest / batch upload ---
+# Cap kích thước 1 file (MB) — vượt sẽ reject ngay khi streaming write
+MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "5120"))         # 5GB default
+# Số job xử lý song song trong worker pool
+INGEST_WORKER_CONCURRENCY: int = int(os.getenv("INGEST_WORKER_CONCURRENCY", "2"))
+# Cap số file/batch (multipart array hoặc from-urls)
+INGEST_MAX_BATCH_SIZE: int = int(os.getenv("INGEST_MAX_BATCH_SIZE", "50"))
+# Job giữ trong RAM bao lâu sau khi done/failed (giây)
+INGEST_JOB_TTL_SEC: int = int(os.getenv("INGEST_JOB_TTL_SEC", "3600"))
+# Kích thước chunk khi stream-to-disk (bytes)
+UPLOAD_STREAM_CHUNK: int = int(os.getenv("UPLOAD_STREAM_CHUNK", str(1 << 20)))   # 1MB
+
+# --- Preview optimization ---
+# Số trang/slide đầu tiên parse để gen metadata preview
+PREVIEW_MAX_PAGES: int = int(os.getenv("PREVIEW_MAX_PAGES", "5"))
+# Số giây đầu video transcribe để gen metadata preview
+PREVIEW_VIDEO_CLIP_SEC: int = int(os.getenv("PREVIEW_VIDEO_CLIP_SEC", "180"))
