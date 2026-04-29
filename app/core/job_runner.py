@@ -197,6 +197,7 @@ class JobRunner:
                 file_path=str(file_path),
                 original_name=payload.get("filename") or job.filename,
                 metadata=payload.get("metadata"),
+                document_id=job.document_id,
             )
             await self._store.update(
                 job.job_id,
@@ -218,6 +219,7 @@ class JobRunner:
                 local_path=str(file_path),
                 original_name=payload.get("filename") or job.filename,
                 metadata=payload.get("metadata"),
+                document_id=job.document_id,
             )
             await self._store.update(
                 job.job_id,
@@ -242,6 +244,7 @@ class JobRunner:
                 ingest_youtube_playlist,
                 playlist_url=url,
                 metadata=payload.get("metadata"),
+                document_id=job.document_id,
             )
             results = data.get("results") or []
             total_chunks = sum(r.get("chunks_added", 0) for r in results)
@@ -258,6 +261,7 @@ class JobRunner:
             ingest_youtube,
             url=url,
             metadata=payload.get("metadata"),
+            document_id=job.document_id,
         )
         await self._store.update(
             job.job_id,

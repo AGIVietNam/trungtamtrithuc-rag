@@ -281,6 +281,7 @@ def ingest_document(
     file_path: str,
     original_name: str,
     metadata: dict | None = None,
+    document_id: str | None = None,
 ) -> IngestResult:
     path = Path(file_path)
     logger.info("Ingesting document: %s", original_name)
@@ -380,6 +381,8 @@ def ingest_document(
                 "heading_path": chunk.heading_path,
                 "uploaded_at": uploaded_at,
             }
+            if document_id:
+                payload["document_id"] = document_id
             # Lưu context riêng — debug only, không ảnh hưởng search/citations.
             if ctx.context:
                 payload["context"] = ctx.context

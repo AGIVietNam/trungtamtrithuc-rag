@@ -1329,6 +1329,84 @@ async def get_job_status(job_id: str) -> JobStatusResponse:
     return JobStatusResponse(**job.to_dict())
 
 
+@router.delete("/document/{document_id}")
+async def delete_document_chunks(
+    document_id: str,
+    domain: str | None = None,
+) -> dict:
+    """Xoá toàn bộ chunks Qdrant gắn với 1 BE document.id.
+
+    Flow: BE xoá S3 object + xoá DB record → call endpoint này → AI xoá Qdrant.
+    Idempotent: document đã không còn chunks → vẫn trả 200, deleted=0.
+
+    Args:
+      document_id: BE document.id (UUID), khớp `payload.document_id` trong Qdrant.
+      domain: tuỳ chọn — slug ("bim", "cntt", ...) hoặc persona VN. Nếu BE biết
+              domain → chỉ quét 2 collection (docs + videos) của domain đó để
+              tiết kiệm round-trip; không cung cấp → quét cả 20 collection.
+
+    Returns:
+      {
+        "document_id": str,
+        "deleted_chunks": int,           # tổng chunk đã xoá qua mọi collection
+        "collections_affected": [str],   # tên collection thực sự có chunk bị xoá
+      }
+    """
+    from app.ingestion.doc_pipeline import _get_registry
+
+    doc_id_clean = document_id.strip()
+    if not doc_id_clean:
+        raise HTTPException(status_code=400, detail="document_id bắt buộc.")
+
+    registry = _get_registry()
+    if domain:
+        slug = PERSONA_TO_DOMAIN.get(domain.strip(), domain.strip())
+        if slug not in DOMAINS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Domain '{domain}' không hợp lệ. Chọn 1 trong: {sorted(DOMAINS)}",
+            )
+        stores = registry.stores_for_domain(slug)
+    else:
+        stores = registry.all_stores()
+
+    flt = {"must": [{"key": "document_id", "match": {"value": doc_id_clean}}]}
+
+    total_deleted = 0
+    affected: list[str] = []
+    for store in stores:
+        try:
+            count = store.count_by_filter(flt)
+        except Exception as exc:
+            logger.warning(
+                "count_by_filter failed for %s document_id=%s: %s",
+                store.collection, doc_id_clean, exc,
+            )
+            continue
+        if count == 0:
+            continue
+        try:
+            store.delete_by_filter(flt)
+        except Exception as exc:
+            logger.warning(
+                "delete_by_filter failed for %s document_id=%s: %s",
+                store.collection, doc_id_clean, exc,
+            )
+            continue
+        total_deleted += count
+        affected.append(store.collection)
+        logger.info(
+            "Deleted %d chunks from %s for document_id=%s",
+            count, store.collection, doc_id_clean,
+        )
+
+    return {
+        "document_id": doc_id_clean,
+        "deleted_chunks": total_deleted,
+        "collections_affected": affected,
+    }
+
+
 @router.get("/batches/{batch_id}", response_model=BatchStatusResponse)
 async def get_batch_status(batch_id: str) -> BatchStatusResponse:
     summary = await get_store().get_batch(batch_id)

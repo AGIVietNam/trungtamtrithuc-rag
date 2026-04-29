@@ -241,6 +241,12 @@ class QdrantStore:
         self.ensure_collection()
         self._req("POST", f"/collections/{self.collection}/points/delete", {"filter": filter})
 
+    def count_by_filter(self, filter: dict, exact: bool = True) -> int:
+        """Đếm số point khớp filter. Dùng cho audit trước khi delete."""
+        body = {"filter": filter, "exact": exact}
+        result = self._req("POST", f"/collections/{self.collection}/points/count", body)
+        return int(result.get("result", {}).get("count", 0))
+
 
 # ── QdrantRegistry ────────────────────────────────────────────────────────────
 
@@ -309,7 +315,7 @@ class QdrantRegistry:
         for store in self._stores.values():
             try:
                 store.ensure_collection()
-                store.ensure_payload_indexes(["doc_id", "domain", "metadata.domain"])
+                store.ensure_payload_indexes(["doc_id", "document_id", "domain", "metadata.domain"])
                 created += 1
             except Exception as e:
                 print(f"ensure_all: FAILED for collection '{store.collection}': {e}")

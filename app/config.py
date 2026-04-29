@@ -107,7 +107,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # Cap kích thước 1 file (MB) — vượt sẽ reject ngay khi streaming write
 MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "5120"))         # 5GB default
 # Số job xử lý song song trong worker pool
-INGEST_WORKER_CONCURRENCY: int = int(os.getenv("INGEST_WORKER_CONCURRENCY", "2"))
+INGEST_WORKER_CONCURRENCY: int = int(os.getenv("INGEST_WORKER_CONCURRENCY", "4"))
 # Cap số file/batch (multipart array hoặc from-urls)
 INGEST_MAX_BATCH_SIZE: int = int(os.getenv("INGEST_MAX_BATCH_SIZE", "50"))
 # Job giữ trong RAM bao lâu sau khi done/failed (giây)

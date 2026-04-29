@@ -119,6 +119,7 @@ def _upsert_video_chunks(
     file_source: str,
     metadata: dict | None,
     playlist_info: dict | None = None,
+    document_id: str | None = None,
 ) -> int:
     uploaded_at = datetime.now(timezone.utc).isoformat()
     chunks = chunk_transcript_with_timestamps(segments, max_tokens=500)
@@ -172,6 +173,8 @@ def _upsert_video_chunks(
             "uploaded_at": uploaded_at,
             "file_source": file_source,
         }
+        if document_id:
+            payload["document_id"] = document_id
         if file_source == "youtube" and source_url:
             payload["youtube_url"] = f"https://www.youtube.com/watch?v={video_id}&t={int(start_sec)}s"
         # Inject metadata top-level để filter/display đồng bộ với doc pipeline
@@ -211,6 +214,7 @@ def ingest_video_file(
     local_path: str,
     original_name: str,
     metadata: dict | None = None,
+    document_id: str | None = None,
 ) -> IngestResult:
     from app.ingestion.video_transcriber import get_transcriber
 
@@ -234,6 +238,7 @@ def ingest_video_file(
         source_url=None,
         file_source="local",
         metadata=metadata,
+        document_id=document_id,
     )
     return IngestResult(
         doc_id=video_id,
@@ -247,6 +252,7 @@ def ingest_youtube(
     url: str,
     metadata: dict | None = None,
     playlist_info: dict | None = None,
+    document_id: str | None = None,
 ) -> IngestResult:
     from app.ingestion.youtube_fetcher import (
         fetch_youtube_transcript, fetch_youtube_via_whisper,
@@ -275,6 +281,7 @@ def ingest_youtube(
         file_source="youtube",
         metadata=metadata,
         playlist_info=playlist_info,
+        document_id=document_id,
     )
     return IngestResult(
         doc_id=data["video_id"],
@@ -287,6 +294,7 @@ def ingest_youtube(
 def ingest_youtube_playlist(
     playlist_url: str,
     metadata: dict | None = None,
+    document_id: str | None = None,
 ) -> dict:
     """Ingest all videos from a YouTube playlist, one by one.
 
@@ -321,6 +329,7 @@ def ingest_youtube_playlist(
                 url=f"https://www.youtube.com/watch?v={vid}",
                 metadata=metadata,
                 playlist_info=playlist_payload or None,
+                document_id=document_id,
             )
             results.append({
                 "video_id": vid,
